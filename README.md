@@ -6,7 +6,7 @@ A Raspberry Pi will be used to: collect data from a temperature sensor to then r
 # Requirements for Pi:
 
 ## Hardware:  
-- Raspberry Pi (3B+, 4, or newer recommended)  
+- Raspberry Pi 4 
 - microSD card  
   - Minimum: 8 GB  
   - Recommended: 16–32 GB, Class 10  
