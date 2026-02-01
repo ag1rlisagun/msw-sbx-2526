@@ -5,7 +5,8 @@ A Raspberry Pi will be used to: collect data from a temperature sensor to then r
 
 # Software Team  
 Lead: Aaliyah Wusu
-  Shaira Zareen Islam  
+
+Shaira Zareen Islam  
 
 # Requirements for Pi:
 
