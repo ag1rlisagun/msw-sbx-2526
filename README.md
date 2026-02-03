@@ -128,3 +128,8 @@ pip install --upgrade pip
 pip install adafruit-blinka
 pip install adafruit-circuitpython-ads1x15
 ```
+
+## Connecting Sensors
+# 1. Current Sensor
+After wiring (and verifying I²C), confirm detection using:
+`sudo i2cdetect -y 1'
