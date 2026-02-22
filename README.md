@@ -1,6 +1,6 @@
 # Mission SpaceWalker - CAN-SBX 2025-2026
 
-Repository for the 2025–2026 CAN-SBX stratospheric balloon experiment. The payload is a capillary-driven bioreactor cultivating cyanobacteria (*Synechococcus*) under near-space conditions. The experiment evaluates radiation-induced changes in the organism's ability to generate bioelectricity in real time through a photosynthetic air-cathode microbial fuel cell system, by continuously measuring current output and oxygen evolution throughout the stratospheric profile.
+Repository for the 2025–2026 CAN-SBX stratospheric balloon experiment. The payload is a capillary-driven bioreactor cultivating cyanobacteria under near-space conditions. The experiment evaluates radiation-induced changes in the organism's ability to generate bioelectricity in real time through a photosynthetic air-cathode microbial fuel cell system, by continuously measuring current output and oxygen evolution throughout the stratospheric profile.
 
 A Raspberry Pi 4 collects data from six sensors across the full flight. All data is stored locally to an SD card in a SQLite database - no telemetry, no external dependencies.
 
