@@ -101,6 +101,13 @@ msw-sbx-2526/
 │   └── test_uvb_sensor.py           # 🔲 Stub. Includes SEN0636 register byte-parsing
 │                                    #    tests (no hardware needed).
 │
+├── tools/
+│   └── benchmark_adc.py             # Measures real ADS1115 sample rate on the Pi.
+│                                    # Run once when hardware arrives - result needed
+│                                    # to confirm SAMPLE_INTERVAL_S is appropriate
+│                                    # Usage: python3 tools/benchmark_adc.py
+│                                    
+│
 ├── msw-sensors.service              # systemd unit - auto-starts on Pi power-on.
 │                                    # Install: sudo cp msw-sensors.service
 │                                    #   /etc/systemd/system/ && sudo systemctl
@@ -190,3 +197,12 @@ USE_DUMMY_SENSORS=true python3 src/main.py
 | `HEATER_SSR_PIN` | Not yet assigned - set in `config.py` once wiring is confirmed, then switch `HEATER_CONTROLLER` to `"ssr"` |
 | D.O. calibration | `voltage_mv` is logged; conversion to mg/L is done post-flight using the pre-flight calibration curve |
 | Per-sensor unit test stubs | Written and documented - implementation pending |
+| ADS1115 max sample rate | Run `tools/benchmark_adc.py` when hardware arrives |
+
+---
+
+## Pre-Flight Tools
+
+| Script | Purpose | When to run |
+|---|---|---|
+| `tools/benchmark_adc.py` | Measures real ADS1115 sample rate - confirms `SAMPLE_INTERVAL_S` is safe and provides max SPS figure | Once, when Pi and ADS1115 arrive |
