@@ -320,6 +320,20 @@ Tests run without hardware using dummy sensors. Completed tests cover the data l
 
 ---
 
+## Pre-Flight Tools
+
+### ADC Sample Rate Benchmark
+
+The ADS1115 is shared between the current sensor (AIN0) and PAR sensor (AIN1). Its theoretical maximum is 860 SPS but the real achievable rate on the Pi is limited by I2C bus speed and Python overhead. Run this benchmark once when hardware arrives to confirm `SAMPLE_INTERVAL_S` in `config.py` is appropriate.  
+
+```bash
+python3 tools/benchmark_adc.py
+```
+
+The script reads 500 samples from each active ADC channel, reports the sample rate in SPS, and tells you whether the current `SAMPLE_INTERVAL_S = 1.0` setting is within a safe margin. At 1 second per sample the bar is very low - this is mainly to have the number on record.
+
+---
+
 ## Configuration
 
 All tunable values are in `src/config.py`. Key settings:
@@ -355,6 +369,7 @@ All tunable values are in `src/config.py`. Key settings:
 - [ ] `HEATER_CONTROLLER = "ssr"` set in `config.py`
 - [ ] SSR switching verified with multimeter before connecting heater to load terminals
 - [ ] SD card formatted and has sufficient space (16 GB+ recommended)
+- [ ] `python3 tools/benchmark_adc.py` run. 
 
 ---
 
@@ -364,4 +379,5 @@ All tunable values are in `src/config.py`. Key settings:
 |---|---|
 | Heater controller GPIO pin | `HEATER_SSR_PIN` not yet set in `config.py` - assign a free BCM pin and set `HEATER_CONTROLLER = "ssr"` |
 | D.O. calibration to mg/L | Raw voltage (mV) is logged; conversion done post-flight using pre-flight calibration curve |
+| ADS1115 max sample rate | Run `tools/benchmark_adc.py` when hardware arrives |
 | Per-sensor unit tests | Stubs written, implementation pending - see `tests/test_*.py` |
