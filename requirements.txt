@@ -1,0 +1,4 @@
+# Formatting
+black
+
+# Testing (no extra deps needed - uses stdlib unittest)

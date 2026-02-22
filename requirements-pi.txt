@@ -1,0 +1,15 @@
+# All requirements for running on the Raspberry Pi (production)
+# Install with: pip install -r requirements-pi.txt
+
+# Formatting
+black
+
+# Raspberry Pi / hardware
+adafruit-blinka
+adafruit-circuitpython-ads1x15
+smbus2
+w1thermsensor
+pigpio
+RPi.GPIO           # SSR / relay control via GPIO pin
+
+# Testing (no extra deps needed - uses stdlib unittest)

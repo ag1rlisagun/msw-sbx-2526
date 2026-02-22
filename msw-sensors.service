@@ -1,0 +1,34 @@
+[Unit]
+Description=MSW CAN-SBX 2025-2026 Sensor Collection
+# Start after networking and file system are ready
+After=multi-user.target
+
+[Service]
+User=pi
+WorkingDirectory=/home/pi/msw-sbx-2526
+ExecStart=/home/pi/msw-sbx-2526/run.sh
+Restart=always
+RestartSec=10
+# Give sensors time to initialize on first boot
+TimeoutStartSec=30
+
+# Capture all stdout/stderr to the systemd journal
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+
+# SETUP INSTRUCTIONS:
+# 1. Copy this file to /etc/systemd/system/msw-sensors.service
+#    sudo cp msw-sensors.service /etc/systemd/system/
+# 2. Reload systemd:
+#    sudo systemctl daemon-reload
+# 3. Enable (auto-start on boot):
+#    sudo systemctl enable msw-sensors
+# 4. Start now:
+#    sudo systemctl start msw-sensors
+# 5. Check status:
+#    sudo systemctl status msw-sensors
+# 6. View live logs:
+#    sudo journalctl -u msw-sensors -f
