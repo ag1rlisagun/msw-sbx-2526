@@ -38,6 +38,7 @@ src/
   sensors/dummy/        - software stand-ins (run anywhere, no hardware needed)
   actuators/            - heater controller interface
   storage/              - SQLite data logger
+  tools/                - benchmark for SAMPLE_INTERVAL_S (run when ADS1115 arrives)
   data/                 - sensor_data.db and log file written here at runtime
 tests/                  - unit tests
 ```
