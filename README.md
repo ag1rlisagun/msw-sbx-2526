@@ -7,8 +7,8 @@ A Raspberry Pi 4 collects data from six sensors across the full flight. All data
 ## Software Team
 
 **Lead:** Aaliyah Wusu  
-Shaira Zareen Islam
-Nsikan Akpan  
+Shaira Zareen Islam  
+Nsikan Akpan   
 
 
 ---
