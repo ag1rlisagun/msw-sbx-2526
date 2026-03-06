@@ -44,11 +44,21 @@ class TestPARSensorLifecycle(unittest.TestCase):
 
     def test_connect_and_read(self):
         # TODO: full lifecycle returns dict with "voltage_v" and "par_umol_m2_s"
-        pass
+        sensor = PARSensor()
+        sensor.connect()
+        sensor.start()
+        data = sensor.read()
+        self.assertIsInstance(data, dict, "read() should return a dict")
+        self.assertIn("Voltage_V", data, "read() output must contain "Voltage_V"")
+        self.assertIn("par_umo1_m2_s", data, "read() output must contain "par_umo1_m2_s"")
+        sensor.stop()
+        sensor.disconnects()
+        
 
     def test_read_before_start_raises(self):
         # TODO: RuntimeError if read() before start()
-        pass
+        
+        
 
 
 class TestPARSensorOutput(unittest.TestCase):
