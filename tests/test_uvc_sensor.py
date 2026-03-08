@@ -42,27 +42,54 @@ from sensors.dummy.dummy_uvc_sensor import UVCSensor
 class TestUVCSensorLifecycle(unittest.TestCase):
 
     def test_connect_and_read(self):
-        # TODO: full lifecycle returns dict with "voltage_v" and "intensity_mw_cm2"
-        pass
+        sensor = UVCSensor()
+        sensor.connect()
+        sensor.start()
+        data = sensor.read()
+        self.assertIn("voltage_v", data)
+        self.assertIn("intensity_mw_cm2", data)
+        sensor.stop()
+        sensor.disconnect()
 
     def test_read_before_start_raises(self):
-        # TODO: RuntimeError if read() before start()
-        pass
+        sensor = UVCSensor()
+        sensor.connect()
+        with self.assertRaises(RuntimeError):
+            sensor.read()
+        sensor.disconnect()
 
 
 class TestUVCSensorOutput(unittest.TestCase):
 
     def test_output_keys(self):
-        # TODO: verify both "voltage_v" and "intensity_mw_cm2" are in output
-        pass
+        sensor = UVCSensor()
+        sensor.connect()
+        sensor.start()
+        data = sensor.read()
+        self.assertIn("voltage_v", data)
+        self.assertIn("intensity_mw_cm2", data)
+        sensor.stop()
+        sensor.disconnect()
 
     def test_intensity_non_negative(self):
-        # TODO: run 20 reads, verify intensity_mw_cm2 >= 0 every time
-        pass
+        sensor = UVCSensor()
+        sensor.connect()
+        sensor.start()
+        for _ in range(20):
+            data = sensor.read()
+            self.assertGreaterEqual(data["intensity_mw_cm2"], 0)
+        sensor.stop()
+        sensor.disconnect()
 
     def test_formula_correctness(self):
-        # TODO: verify intensity_mw_cm2 ≈ voltage_v * 2.9 within a small tolerance
-        pass
+        sensor = UVCSensor()
+        sensor.connect()
+        sensor.start()
+        data = sensor.read()
+        expected = data["voltage_v"] * 2.9
+        self.assertAlmostEqual(data["intensity_mw_cm2"], expected, places=2)
+        sensor.stop()
+        sensor.disconnect()
 
 
 class TestMCP3221ADCParsing(unittest.TestCase):
@@ -72,19 +99,31 @@ class TestMCP3221ADCParsing(unittest.TestCase):
     """
 
     def test_known_byte_values(self):
-        # TODO: import the real UVCSensor and call _read_raw() with mocked smbus2
-        # Example: bytes [0x01, 0xFF] should give adc = (0x01 << 8) | 0xFF = 511
-        # Then voltage = (511 / 4096) * vcc
-        # Use unittest.mock.patch to mock the smbus2.SMBus.read_i2c_block_data call
-        pass
+        from sensors.uvc_sensor import UVCSensor as RealUVCSensor
+        import smbus2
+        with unittest.mock.patch.object(smbus2.SMBus, 'read_i2c_block_data') as mock_read:
+            mock_read.return_value = [0x01, 0xFF]
+            sensor = RealUVCSensor()
+            adc = sensor._read_raw()
+            self.assertEqual(adc, 511)
 
     def test_max_adc_value(self):
-        # TODO: bytes [0x0F, 0xFF] → adc = 4095 → voltage ≈ vcc
-        pass
+        from sensors.uvc_sensor import UVCSensor as RealUVCSensor
+        import smbus2
+        with unittest.mock.patch.object(smbus2.SMBus, 'read_i2c_block_data') as mock_read:
+            mock_read.return_value = [0x0F, 0xFF]
+            sensor = RealUVCSensor()
+            adc = sensor._read_raw()
+            self.assertEqual(adc, 4095)
 
     def test_zero_adc_value(self):
-        # TODO: bytes [0x00, 0x00] → adc = 0 → voltage = 0 → intensity = 0
-        pass
+        from sensors.uvc_sensor import UVCSensor as RealUVCSensor
+        import smbus2
+        with unittest.mock.patch.object(smbus2.SMBus, 'read_i2c_block_data') as mock_read:
+            mock_read.return_value = [0x00, 0x00]
+            sensor = RealUVCSensor()
+            adc = sensor._read_raw()
+            self.assertEqual(adc, 0)
 
 
 if __name__ == "__main__":
