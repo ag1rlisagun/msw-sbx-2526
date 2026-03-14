@@ -4,7 +4,7 @@ Description=MSW CAN-SBX 2025-2026 Sensor Collection
 After=multi-user.target
 
 [Service]
-User=pi
+User=msw2026
 WorkingDirectory=/home/pi/msw-sbx-2526
 ExecStart=/home/pi/msw-sbx-2526/run.sh
 Restart=always
