@@ -102,10 +102,22 @@ msw-sbx-2526/
 │                                    #    tests (no hardware needed).
 │
 ├── tools/
-│   └── benchmark_adc.py             # Measures real ADS1115 sample rate on the Pi.
+│   ├── benchmark_adc.py             # Measures real ADS1115 sample rate on the Pi.
+│   │                                # Run once when hardware arrives - result needed
+│   │                                # to confirm SAMPLE_INTERVAL_S is appropriate
+│   │                                # and to report max SPS to Megan.
+│   │                                # Usage: python3 tools/benchmark_adc.py
+│   │
+│   └── analyse_do.py                # Post-flight DO analysis script.
+│                                    # Converts raw voltage_mv → % saturation and mg/L
+│                                    # using pre-flight calibration voltage + temperature.
+│                                    # Optional pressure correction for stratosphere data.
+│                                    # Usage: python3 tools/analyse_do.py --db src/data/sensor_data.db --cal <mV>
 │                                    # Run once when hardware arrives - result needed
 │                                    # to confirm SAMPLE_INTERVAL_S is appropriate
+│                                    # and to report max SPS to Megan.
 │                                    # Usage: python3 tools/benchmark_adc.py
+│
 │                                    
 │
 ├── msw-sensors.service              # systemd unit - auto-starts on Pi power-on.
@@ -197,7 +209,7 @@ USE_DUMMY_SENSORS=true python3 src/main.py
 | `HEATER_SSR_PIN` | Not yet assigned - set in `config.py` once wiring is confirmed, then switch `HEATER_CONTROLLER` to `"ssr"` |
 | D.O. calibration | `voltage_mv` is logged; conversion to mg/L is done post-flight using the pre-flight calibration curve |
 | Per-sensor unit test stubs | Written and documented - implementation pending |
-| ADS1115 max sample rate | Run `tools/benchmark_adc.py` when hardware arrives |
+| ADS1115 max sample rate | Run `tools/benchmark_adc.py` when hardware arrives and report result to Megan |
 
 ---
 
@@ -206,3 +218,6 @@ USE_DUMMY_SENSORS=true python3 src/main.py
 | Script | Purpose | When to run |
 |---|---|---|
 | `tools/benchmark_adc.py` | Measures real ADS1115 sample rate - confirms `SAMPLE_INTERVAL_S` is safe and provides max SPS figure | Once, when Pi and ADS1115 arrive |
+| `tools/analyse_do.py` | Converts raw `voltage_mv` → % saturation and mg/L using pre-flight calibration voltage and temperature data | Post-flight, after recovery |
+
+

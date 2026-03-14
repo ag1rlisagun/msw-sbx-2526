@@ -40,7 +40,8 @@ src/
   sensors/dummy/        - software stand-ins (run anywhere, no hardware needed)
   actuators/            - heater controller interface
   storage/              - SQLite data logger
-  tools/                - benchmark for SAMPLE_INTERVAL_S (run when ADS1115 arrives)
+  tools/                - benchmark for SAMPLE_INTERVAL_S (run when ADS1115 arrives) 
+                        - post-flight DO conversion voltage_mv → mg/L and % saturation
   data/                 - sensor_data.db and log file written here at runtime
 tests/                  - unit tests
 ```
@@ -335,6 +336,81 @@ python3 tools/benchmark_adc.py
 
 The script reads 500 samples from each active ADC channel, reports the sample rate in SPS, and tells you whether the current `SAMPLE_INTERVAL_S = 1.0` setting is within a safe margin. At 1 second per sample the bar is very low - this is mainly to have the number on record.
 
+### D.O. Pre-Flight Calibration Procedure
+
+The dissolved oxygen sensor logs raw `voltage_mv` during flight. To convert those voltages to mg/L after recovery, you need a single reference point recorded before launch.
+
+**Steps (do this at the launch site, after all sensors are connected and running):**
+
+1. Ensure `./run.sh` is running and the DO sensor is logging
+2. Leave the probe exposed to open air - do not submerge it
+3. Watch the `voltage_mv` readings stabilise (allow at least 5 minutes)
+4. Once stable, record in your lab notebook:
+   - The `voltage_mv` value ← this is your `--cal` value
+   - The temperature reading from the DS18B20 at that moment
+   - The time of calibration
+5. This is the only number that cannot be recovered after the fact - do not skip it
+
+The Atlas default full-saturation voltage is **440.0 mV** (`40.0 × 11.0` from `do_surveyor.h`). Your probe may read slightly differently - that's exactly why you do this calibration.
+
+---
+
+## Post-Flight Analysis
+
+### Step 1 - Retrieve the database
+
+Put the SD card in a card reader. The Pi's main partition is ext4 (Linux only). On a Mac, retrieve the database over SSH instead:
+
+```bash
+scp <username>@msw2026.local:~/msw-sbx-2526/src/data/sensor_data.db ./sensor_data.db
+```
+
+### Step 2 - Verify data integrity
+
+```bash
+sqlite3 sensor_data.db
+
+-- Check all tables exist and have data
+SELECT 'temperature',      COUNT(*) FROM temperature
+UNION SELECT 'current',    COUNT(*) FROM current
+UNION SELECT 'dissolved_oxygen', COUNT(*) FROM dissolved_oxygen
+UNION SELECT 'par',        COUNT(*) FROM par
+UNION SELECT 'uvc',        COUNT(*) FROM uvc
+UNION SELECT 'uvb',        COUNT(*) FROM uvb;
+
+-- Check time range
+SELECT
+  datetime(MIN(timestamp), 'unixepoch') AS start,
+  datetime(MAX(timestamp), 'unixepoch') AS end,
+  COUNT(*) AS readings
+FROM temperature;
+```
+
+### Step 3 - Convert D.O. voltage to mg/L
+
+Using your pre-flight calibration voltage and the concurrent temperature data:
+
+```bash
+# Minimal - prints summary and 5-row preview
+python3 tools/analyse_do.py   --db sensor_data.db   --cal <your_calibration_mV>
+
+# With altitude/pressure correction (recommended - accounts for stratospheric conditions)
+python3 tools/analyse_do.py   --db sensor_data.db   --cal <your_calibration_mV>   --pressure-csv altitude.csv
+
+# Save full results to CSV for reporting
+python3 tools/analyse_do.py   --db sensor_data.db   --cal <your_calibration_mV>   --out results/do_analysis.csv
+```
+
+**What the script calculates:**
+
+| Output column | Formula | Notes |
+|---|---|---|
+| `saturation_pct` | `(voltage_mv / cal_voltage) × 100` | Simple ratio against calibration reference |
+| `do_mg_L` | `saturation_pct × solubility_at_temp(temp_c)` | Uses Standard Methods (APHA 4500-O) solubility table, interpolated per temperature reading |
+| `do_mg_L_corrected` | `do_mg_L × (pressure_kpa / 101.325)` | Pressure correction - important for float altitude where ambient O₂ partial pressure is ~1–2% of sea level |
+
+The pressure correction is what makes the stratosphere data scientifically meaningful - without it, the mg/L values during float would assume sea-level oxygen partial pressure, which is not the environment the cyanobacteria were experiencing.
+
 ---
 
 ## Configuration
@@ -363,7 +439,12 @@ All tunable values are in `src/config.py`. Key settings:
 - [ ] `ls /sys/bus/w1/devices/` shows `28-xxxxxxxxxxxx`
 - [ ] `sudo systemctl status pigpiod` shows active
 - [ ] ACS723 part number confirmed → correct sensitivity set in `config.py`
-- [ ] D.O. sensor calibration completed → calibration curve recorded
+- [ ] D.O. pre-flight calibration completed:
+  - Leave probe exposed to open air for 5+ minutes until `voltage_mv` stabilises
+  - Record the stable `voltage_mv` reading ← this is your `--cal` value for post-flight analysis
+  - Record the temperature (from DS18B20) at the moment of calibration
+  - Record the time of calibration
+  - Write all of this in your lab notebook - it cannot be recovered after the fact
 - [ ] `./run.sh --dummy` runs clean with no errors
 - [ ] `./run.sh` runs on Pi with real hardware - all 6 sensors appear in startup log
 - [ ] Systemd service enabled (`sudo systemctl enable msw-sensors`)
