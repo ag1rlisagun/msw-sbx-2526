@@ -1,30 +1,14 @@
 # Monitoring Data on the Pi
 
-## Watch the database and logs live
+## Watch all sensors and logs live
 
-Start a tmux session:
 ```bash
-tmux new -s monitor
+./monitor.sh
 ```
 
-In the first pane, watch the database refresh every 2 seconds:
-```bash
-watch -n 2 'sqlite3 src/data/sensor_data.db ".mode column" ".headers on" \
-  "SELECT datetime(timestamp, '\''unixepoch'\'', '\''localtime'\'') AS time, temperature_c FROM temperature ORDER BY timestamp DESC LIMIT 10;"'
-```
-
-Split the screen - press `Ctrl+b` then `Shift+"`.
-
-In the second pane, tail the log:
-```bash
-tail -f src/data/msw_sensor.log
-```
+This opens a tmux session with all sensor tables updating every 2 seconds on top and the log streaming on the bottom. New sensors show up automatically - no script changes needed.
 
 Switch between panes with `Ctrl+b ↑` or `Ctrl+b ↓`.
-
-Change the table/column names in the `watch` command to view a different sensor.
-
-### If you disconnect
 
 Detach: `Ctrl+b d`
 Reattach: `tmux attach -t monitor`
