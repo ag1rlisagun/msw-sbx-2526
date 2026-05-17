@@ -20,7 +20,7 @@ fi
 
 # Top pane: cycle through every table in the database
 tmux new-session -d -s "$SESSION" \
-  "watch -n 2 'for table in \$(sqlite3 $DB \"SELECT name FROM sqlite_master WHERE type=\\\"table\\\" ORDER BY name;\"); do
+  "watch -n 2 'for table in \$(sqlite3 $DB \"SELECT name FROM sqlite_master WHERE type=\\\"table\\\" AND name != \\\"sqlite_sequence\\\" ORDER BY name;\"); do
     echo \"========== \$table ==========\"
     sqlite3 -column -header $DB \"SELECT datetime(timestamp, \\\"unixepoch\\\", \\\"localtime\\\") AS time, * FROM \$table ORDER BY timestamp DESC LIMIT 5;\"
     echo \"\"
