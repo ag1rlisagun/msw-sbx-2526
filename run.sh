@@ -43,5 +43,3 @@ if $USE_DUMMY; then
 else
   python3 src/main.py
 fi
-EOF
-chmod +x run.sh
