@@ -1,25 +1,33 @@
 """
-do_sensor.py - Atlas Scientific Mini D.O. + Surveyor Analog Isolator.
+do_sensor.py - Atlas Scientific Mini D.O. + Surveyor Analog Isolator via ADS1015.
 
-The Surveyor Isolator converts the D.O. probe's analog voltage into a
-10.6 kHz PWM signal. Pulse width encodes the oxygen level.
+UPDATED (FRR schematic, Figure 10):
+    The electrical team routes the Surveyor Analog Isolator's analog output
+    through an ADS1015 ADC, then to the Pi over I2C.  This replaces the
+    previous PWM/pigpio approach.
 
-Math (from do_iso_surveyor.cpp reference):
-    voltage_mv = (avg_pulse_width_us * 20.0) - 60.0
+Wiring (from schematic):
+    D.O. probe  → Surveyor Analog Isolator
+    Isolator analog output (+) → ADS1015 AIN2 (via R7 1kΩ + C5 1µF filter)
+    ADS1015 SDA/SCL → Pi I2C bus (GPIO2/GPIO3)
 
-pigpio is required because standard GPIO interrupt libraries (RPi.GPIO)
-do not have enough timing resolution for a 10.6 kHz signal.
+The isolator outputs a voltage proportional to dissolved oxygen.
+Raw voltage_mv is logged; conversion to mg/L is done post-flight
+using the pre-flight calibration curve.
+
+IMPORTANT - I2C ADDRESS:
+    The ADS1015 may be shared with the current sensor (AIN0).
+    If so, they use the same I2C address (default 0x48).
+    If the D.O. uses a separate ADS1015, confirm the address with
+    the electrical team.
 
 Prerequisites:
-    sudo apt install pigpio python3-pigpio
-    sudo systemctl enable pigpiod
-    sudo systemctl start pigpiod
+    pip install adafruit-blinka adafruit-circuitpython-ads1x15
+    Enable I2C: sudo raspi-config → Interface Options → I2C
 """
 
 import time
 import logging
-import pigpio
-
 from sensors.base_sensor import BaseSensor
 
 log = logging.getLogger(__name__)
@@ -28,95 +36,71 @@ log = logging.getLogger(__name__)
 class DOSensor(BaseSensor):
     def __init__(
         self,
-        pwm_pin: int = 17,
-        avg_samples: int = 30,
-        pulse_timeout_us: int = 400,
+        i2c_address: int = 0x48,
+        channel: int = 2,
+        sample_count: int = 10,
     ):
         """
         Args:
-            pwm_pin: BCM GPIO pin connected to the Surveyor Isolator PWM output
-            avg_samples: number of pulses to average (mirrors volt_avg_len*3 in C++)
-            pulse_timeout_us: max wait for a pulse in microseconds
+            i2c_address: ADS1015 I2C address (default 0x48, may be shared
+                         with current sensor on a different channel)
+            channel:     ADS1015 analog input channel (2 = AIN2 from schematic)
+            sample_count: readings to average per call to read()
         """
         super().__init__(name="dissolved_oxygen")
-        self.pwm_pin = pwm_pin
-        self.avg_samples = avg_samples
-        self.pulse_timeout_us = pulse_timeout_us
-        self._pi = None
-        self._pulse_widths = []
-        self._cb = None
+        self.i2c_address = i2c_address
+        self.channel = channel
+        self.sample_count = sample_count
+        self._chan = None
 
     def connect(self) -> None:
         try:
-            self._pi = pigpio.pi()
-            if not self._pi.connected:
-                raise RuntimeError("pigpiod daemon is not running. Start with: sudo systemctl start pigpiod")
-            self._pi.set_mode(self.pwm_pin, pigpio.INPUT)
-            self._pi.set_pull_up_down(self.pwm_pin, pigpio.PUD_DOWN)
+            import board
+            import busio
+            import adafruit_ads1x15.ads1015 as ADS
+            from adafruit_ads1x15.analog_in import AnalogIn
+
+            i2c = busio.I2C(board.SCL, board.SDA)
+            ads = ADS.ADS1015(i2c, address=self.i2c_address)
+            channel_map = [ADS.P0, ADS.P1, ADS.P2, ADS.P3]
+            self._chan = AnalogIn(ads, channel_map[self.channel])
             self._connected = True
-            log.info(f"[{self.name}] Connected via pigpio on GPIO{self.pwm_pin}.")
+            log.info(
+                f"[{self.name}] ADS1015 connected at 0x{self.i2c_address:02X}, "
+                f"channel {self.channel}."
+            )
         except Exception as e:
             raise RuntimeError(f"[{self.name}] Failed to connect: {e}")
 
     def disconnect(self) -> None:
-        self.stop()
-        if self._pi and self._pi.connected:
-            self._pi.stop()
-        self._pi = None
+        self._chan = None
         self._connected = False
+        self._measuring = False
 
     def start(self) -> None:
         if not self._connected:
             raise RuntimeError(f"[{self.name}] Call connect() first.")
-
-        self._pulse_widths = []
-
-        # Register a callback to measure HIGH pulse widths via pigpio ticks
-        self._last_rise = None
-
-        def _edge_cb(gpio, level, tick):
-            if level == 1:
-                self._last_rise = tick
-            elif level == 0 and self._last_rise is not None:
-                # pigpio tick is in microseconds, wraps at 2^32
-                width = pigpio.tickDiff(self._last_rise, tick)
-                if width < self.pulse_timeout_us:
-                    self._pulse_widths.append(width)
-                    if len(self._pulse_widths) > self.avg_samples * 2:
-                        self._pulse_widths = self._pulse_widths[-self.avg_samples:]
-
-        self._cb = self._pi.callback(self.pwm_pin, pigpio.EITHER_EDGE, _edge_cb)
         self._measuring = True
-        # Allow callback to accumulate some samples before first read
-        time.sleep(0.1)
-        log.info(f"[{self.name}] Measurement started.")
 
     def stop(self) -> None:
-        if self._cb:
-            self._cb.cancel()
-            self._cb = None
         self._measuring = False
 
     def read(self) -> dict:
         if not self._connected or not self._measuring:
             raise RuntimeError(f"[{self.name}] Sensor not ready.")
+        try:
+            voltages = []
+            for _ in range(self.sample_count):
+                voltages.append(self._chan.voltage)
+                time.sleep(0.05)
 
-        samples = self._pulse_widths[-self.avg_samples:]
+            avg_voltage = sum(voltages) / len(voltages)
+            # Convert to millivolts for consistency with post-flight analysis
+            voltage_mv = avg_voltage * 1000.0
+            voltage_mv = max(0.0, voltage_mv)  # clamp
 
-        if not samples:
-            # No pulses received - check pin state to distinguish 0% vs 100% DO
-            pin_high = self._pi.read(self.pwm_pin)
-            avg = 80.0 if pin_high else 0.0
-        else:
-            avg = sum(samples) / len(samples)
-
-        # Convert pulse width to voltage (from C++ reference)
-        voltage_mv = (avg * 20.0) - 60.0
-        voltage_mv = max(0.0, voltage_mv)  # clamp - can't be negative
-
-        return {
-            "avg_pulse_width_us": round(avg, 3),
-            "voltage_mv": round(voltage_mv, 3),
-            # Calibration to mg/L or % saturation is done post-flight
-            # using the known voltage-to-DO curve for this probe.
-        }
+            return {
+                "voltage_mv": round(voltage_mv, 3),
+            }
+        except Exception as e:
+            raise RuntimeError(f"[{self.name}] Read failed: {e}")

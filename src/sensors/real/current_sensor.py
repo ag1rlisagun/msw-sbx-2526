@@ -1,13 +1,18 @@
 """
-current_sensor.py - ACS723 current sensor read via ADS1115 ADC over I2C.
+current_sensor.py - ACS723 current sensor read via ADS1015 ADC over I2C.
 
 The ACS723 outputs a voltage proportional to current:
     current = (V_out - V_cc/2) / sensitivity
 
+UPDATED (FRR schematic, Figure 6):
+    The electrical team uses an ADS1015 (12-bit), not ADS1115 (16-bit).
+    The ADS1015 is functionally identical from a software perspective —
+    the adafruit library handles the resolution difference internally.
+
 IMPORTANT HARDWARE NOTE from datasheet reference:
-    The ACS723 requires 4.5-5.5V. If powered at 5V, the ADS1115 must
+    The ACS723 requires 4.5-5.5V. If powered at 5V, the ADS1015 must
     also be on the 5V rail. The Pi's I2C lines are 3.3V logic - you
-    need a logic level shifter between the Pi and ADS1115 to avoid
+    need a logic level shifter between the Pi and ADS1015 to avoid
     damaging the Pi's GPIO pins.
 
 Prerequisites:
@@ -32,8 +37,8 @@ class CurrentSensor(BaseSensor):
     ):
         """
         Args:
-            i2c_address: ADS1115 I2C address (default 0x48)
-            channel: ADS1115 channel connected to ACS723 output (0–3)
+            i2c_address: ADS1015 I2C address (default 0x48)
+            channel: ADS1015 channel connected to ACS723 output (0–3)
             sensitivity: V/A for your specific ACS723 part.
                          5A version  → 0.400 V/A
                          10A version → 0.264 V/A
@@ -52,17 +57,17 @@ class CurrentSensor(BaseSensor):
         try:
             import board
             import busio
-            import adafruit_ads1x15.ads1115 as ADS
+            import adafruit_ads1x15.ads1015 as ADS
             from adafruit_ads1x15.analog_in import AnalogIn
 
             i2c = busio.I2C(board.SCL, board.SDA)
-            ads = ADS.ADS1115(i2c, address=self.i2c_address)
+            ads = ADS.ADS1015(i2c, address=self.i2c_address)
             channel_map = [ADS.P0, ADS.P1, ADS.P2, ADS.P3]
             self._chan = AnalogIn(ads, channel_map[self.channel])
             self._connected = True
-            log.info(f"[{self.name}] ADS1115 connected at 0x{self.i2c_address:02X}, channel {self.channel}.")
+            log.info(f"[{self.name}] ADS1015 connected at 0x{self.i2c_address:02X}, channel {self.channel}.")
         except Exception as e:
-            raise RuntimeError(f"[{self.name}] Failed to connect to ADS1115: {e}")
+            raise RuntimeError(f"[{self.name}] Failed to connect to ADS1015: {e}")
 
     def disconnect(self) -> None:
         self._chan = None

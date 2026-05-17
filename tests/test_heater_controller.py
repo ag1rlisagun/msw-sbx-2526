@@ -3,7 +3,7 @@ test_heater_controller.py - Tests for the heater controller.
 
 WHAT TO TEST HERE:
     PassiveHeaterController has no hardware dependency and can be fully
-    tested now. SSRHeaterController requires mocking RPi.GPIO.
+    tested now. MOSFETHeaterController requires mocking RPi.GPIO.
 
     1. PASSIVE - CONNECT/DISCONNECT:
        Verify connect() and disconnect() complete without error.
@@ -21,39 +21,36 @@ WHAT TO TEST HERE:
        Call update() with temp inside the warning range.
        Verify no WARNING is emitted.
 
-    5. SSR - HEATER TURNS ON WHEN COLD:
+    5. MOSFET - HEATER TURNS ON WHEN COLD:
        Mock RPi.GPIO. Call update() with temp below (target - hysteresis).
-       Verify _set_ssr(True) fires and GPIO.output is called with GPIO.HIGH.
+       Verify _set_heater(True) fires and PWM.ChangeDutyCycle is called with 100.
 
-    6. SSR - HEATER TURNS OFF WHEN HOT:
+    6. MOSFET - HEATER TURNS OFF WHEN HOT:
        Mock RPi.GPIO. Set _heater_on = True manually.
        Call update() with temp above (target + hysteresis).
-       Verify _set_ssr(False) fires and GPIO.output is called with GPIO.LOW.
+       Verify _set_heater(False) fires and PWM.ChangeDutyCycle is called with 0.
 
-    7. SSR - HYSTERESIS HOLDS:
+    7. MOSFET - HYSTERESIS HOLDS:
        With heater on and temp still inside the hysteresis band, verify
-       the SSR state does not change (no chatter).
-       Example: target=25, hysteresis=1, heater on, temp=24.5
-       → still inside band, relay must stay ON.
+       the heater state does not change (no chatter).
+       Example: target=22.5, hysteresis=2.5, heater on, temp=21.0
+       → still inside band, heater must stay ON.
 
-    8. SSR - MISSING PIN RAISES:
-       Verify connect() raises RuntimeError if ssr_pin=None.
+    8. MOSFET - MISSING PIN RAISES:
+       Verify connect() raises RuntimeError if pwm_pin=None.
 
-    9. SSR - HEATER OFF ON DISCONNECT:
-       Set _heater_on = True, call disconnect(), verify GPIO.output
-       is called with GPIO.LOW before GPIO.cleanup.
+    9. MOSFET - HEATER OFF ON DISCONNECT:
+       Set _heater_on = True, call disconnect(), verify PWM.ChangeDutyCycle(0)
+       is called before cleanup.
 
-    10. SSR - heater_on PROPERTY:
+    10. MOSFET - heater_on PROPERTY:
         Verify the heater_on property reflects internal state correctly.
 
-    11. SERIAL - MISSING PORT RAISES:
-        Verify connect() raises RuntimeError if serial_port=None.
+    11. BUILD FUNCTION - MOSFET SELECTED:
+        Patch config.HEATER_CONTROLLER = "mosfet" and config.HEATER_PWM_PIN = 12.
+        Verify build_heater_controller() returns a MOSFETHeaterController.
 
-    12. BUILD FUNCTION - SSR SELECTED:
-        Patch config.HEATER_CONTROLLER = "ssr" and config.HEATER_SSR_PIN = 27.
-        Verify build_heater_controller() returns an SSRHeaterController.
-
-    13. BUILD FUNCTION - UNKNOWN CONTROLLER RAISES:
+    12. BUILD FUNCTION - UNKNOWN CONTROLLER RAISES:
         Patch config.HEATER_CONTROLLER = "banana".
         Verify ValueError is raised.
 """
@@ -66,7 +63,7 @@ from unittest.mock import patch, MagicMock, call
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from actuators.heater_controller import (
-    SSRHeaterController,
+    MOSFETHeaterController,
     PassiveHeaterController
 )
 
@@ -75,9 +72,9 @@ class TestPassiveHeaterController(unittest.TestCase):
 
     def _make(self):
         return PassiveHeaterController(
-            target_c=25.0,
-            warning_low_c=18.0,
-            warning_high_c=30.0,
+            target_c=22.5,
+            warning_low_c=20.0,
+            warning_high_c=25.0,
         )
 
     def test_connect_and_disconnect(self):
@@ -89,53 +86,49 @@ class TestPassiveHeaterController(unittest.TestCase):
         pass
 
     def test_warning_logged_when_too_hot(self):
-        # TODO: update(35.0) → WARNING logged
+        # TODO: update(30.0) → WARNING logged
         pass
 
     def test_no_warning_when_in_range(self):
-        # TODO: update(25.0) → no WARNING
+        # TODO: update(22.5) → no WARNING
         pass
 
 
-class TestSSRHeaterController(unittest.TestCase):
+class TestMOSFETHeaterController(unittest.TestCase):
 
-    def _make(self, pin=27):
-        return SSRHeaterController(
-            target_c=25.0,
-            hysteresis_c=1.0,
-            warning_low_c=18.0,
-            warning_high_c=30.0,
-            ssr_pin=pin,
+    def _make(self, pin=12):
+        return MOSFETHeaterController(
+            target_c=22.5,
+            hysteresis_c=2.5,
+            warning_low_c=20.0,
+            warning_high_c=25.0,
+            pwm_pin=pin,
+            pwm_freq_hz=1000,
         )
 
     def test_connect_raises_without_pin(self):
-        # TODO: ssr_pin=None → RuntimeError on connect()
+        # TODO: pwm_pin=None → RuntimeError on connect()
         pass
 
     def test_heater_turns_on_when_cold(self):
-        # TODO: mock RPi.GPIO, call update(23.5) (below 25-1=24)
-        # verify _heater_on is True and GPIO.output called with GPIO.HIGH
-        # Example mock setup:
-        #   with patch.dict("sys.modules", {"RPi": MagicMock(), "RPi.GPIO": MagicMock()}):
-        #       import importlib, actuators.heater_controller as hc
-        #       importlib.reload(hc)
-        #       ...
+        # TODO: mock RPi.GPIO, call update(19.0) (below 22.5-2.5=20)
+        # verify _heater_on is True and PWM.ChangeDutyCycle called with 100
         pass
 
     def test_heater_turns_off_when_hot(self):
         # TODO: mock RPi.GPIO, set _heater_on = True
-        # call update(26.5) (above 25+1=26)
-        # verify _heater_on is False and GPIO.output called with GPIO.LOW
+        # call update(26.0) (above 22.5+2.5=25)
+        # verify _heater_on is False and PWM.ChangeDutyCycle called with 0
         pass
 
     def test_hysteresis_prevents_chatter(self):
-        # TODO: heater ON, temp = 24.5 (inside band: 24 < 24.5 < 26)
-        # verify SSR state does not change
+        # TODO: heater ON, temp = 21.0 (inside band: 20 < 21 < 25)
+        # verify heater state does not change
         pass
 
     def test_heater_off_on_disconnect(self):
         # TODO: set _heater_on = True, call disconnect()
-        # verify GPIO.output called with LOW before GPIO.cleanup
+        # verify PWM.ChangeDutyCycle(0) called before cleanup
         # verify heater_on is False after disconnect
         pass
 
@@ -144,24 +137,17 @@ class TestSSRHeaterController(unittest.TestCase):
         # after triggering ON, verify heater_on == True
         pass
 
-    def test_warning_still_logged_when_ssr_active(self):
-        # TODO: even when SSR is controlling the heater, temperature
+    def test_warning_still_logged_when_mosfet_active(self):
+        # TODO: even when MOSFET is controlling the heater, temperature
         # warnings should still be logged if temp goes out of warning range
-        pass
-
-
-class TestSerialHeaterController(unittest.TestCase):
-
-    def test_connect_raises_without_port(self):
-        # TODO: serial_port=None → RuntimeError on connect()
         pass
 
 
 class TestBuildHeaterController(unittest.TestCase):
 
-    def test_ssr_selected_by_config(self):
-        # TODO: patch config.HEATER_CONTROLLER = "ssr", config.HEATER_SSR_PIN = 27
-        # verify build_heater_controller() returns SSRHeaterController
+    def test_mosfet_selected_by_config(self):
+        # TODO: patch config.HEATER_CONTROLLER = "mosfet", config.HEATER_PWM_PIN = 12
+        # verify build_heater_controller() returns MOSFETHeaterController
         pass
 
     def test_passive_selected_by_config(self):

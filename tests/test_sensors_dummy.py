@@ -66,7 +66,6 @@ class TestCurrentSensor(unittest.TestCase):
 class TestDOSensor(unittest.TestCase):
     def test_lifecycle(self):
         data = _lifecycle(DOSensor)
-        self.assertIn("avg_pulse_width_us", data)
         self.assertIn("voltage_mv", data)
 
     def test_voltage_mv_never_negative(self):

@@ -1,19 +1,22 @@
 """
 main.py - MSW CAN-SBX 2025-2026 sensor collection entry point.
 
+UPDATED 2026-05-14 based on FRR presentation schematics:
+    - Current sensor: ADS1015 (was ADS1115)
+    - D.O. sensor: ADS1015 analog read (was PWM/pigpio)
+    - PAR sensor: RS-485 MODBUS via MAX485E (was ADS1115 I2C)
+    - Heater: MOSFET PWM (was SSR on/off)
+    - UVB, UVC, Temperature: unchanged
+
 Design:
 - Each sensor runs in its own thread. A failure in one sensor thread
-  does not affect any other sensor - this is the primary lesson from
-  the previous experiment.
+  does not affect any other sensor.
 - Every reading is written to SQLite immediately after it is taken.
 - The logger is shared across threads but is internally thread-safe.
 - On startup, sensors are initialized one by one. If a sensor fails
   to connect, it is skipped with a warning - the others still run.
 - The temperature sensor thread passes each reading to the heater
-  controller so it can act on it (warn, toggle relay, or send serial
-  command - depending on which controller is configured in config.py).
-- The main thread does nothing except keep the process alive and
-  respond to Ctrl-C / SIGTERM cleanly.
+  controller so it can act on it.
 """
 
 import os
@@ -24,7 +27,7 @@ import logging
 import threading
 
 # ---------------------------------------------------------------------------
-# Logging setup - goes to stdout (captured by systemd journal) and a file
+# Logging setup
 # ---------------------------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
@@ -65,24 +68,26 @@ else:
     from sensors.real.uvb_sensor import UVBSensor
 
 # ---------------------------------------------------------------------------
-# Heater controller - selected by HEATER_CONTROLLER in config.py
+# Heater controller
 # ---------------------------------------------------------------------------
 from actuators.heater_controller import (
-    SSRHeaterController,
+    MOSFETHeaterController,
     PassiveHeaterController,
 )
+
 
 def build_heater_controller():
     """Instantiate the heater controller specified in config.py."""
     choice = config.HEATER_CONTROLLER.lower()
 
-    if choice == "ssr":
-        return SSRHeaterController(
+    if choice == "mosfet":
+        return MOSFETHeaterController(
             target_c=config.TEMP_TARGET_C,
             hysteresis_c=config.HEATER_HYSTERESIS_C,
             warning_low_c=config.TEMP_WARNING_LOW_C,
             warning_high_c=config.TEMP_WARNING_HIGH_C,
-            ssr_pin=config.HEATER_SSR_PIN,
+            pwm_pin=config.HEATER_PWM_PIN,
+            pwm_freq_hz=config.HEATER_PWM_FREQ_HZ,
         )
     elif choice == "passive":
         return PassiveHeaterController(
@@ -93,7 +98,7 @@ def build_heater_controller():
     else:
         raise ValueError(
             f"Unknown HEATER_CONTROLLER '{config.HEATER_CONTROLLER}'. "
-            f"Choose 'ssr' or 'passive'."
+            f"Choose 'mosfet' or 'passive'."
         )
 
 
@@ -117,25 +122,15 @@ signal.signal(signal.SIGINT, _handle_signal)
 # ---------------------------------------------------------------------------
 
 def sensor_loop(sensor, db: DataLogger, interval: float, heater=None) -> None:
-    """
-    Runs in its own thread. Collects one reading per interval and writes
-    it to the database. Handles failures independently - a sensor that
-    keeps failing backs off and retries, but never kills other sensors.
-
-    If heater is provided (temperature sensor only), each reading is
-    passed to heater.update() so the controller can act on it.
-    """
     consecutive_failures = 0
-
     log.info(f"[{sensor.name}] Starting collection loop.")
 
     while not _shutdown.is_set():
         try:
             data = sensor.read()
             db.write(sensor.name, data)
-            consecutive_failures = 0  # reset on success
+            consecutive_failures = 0
 
-            # Pass temperature to heater controller
             if heater is not None and "temperature_c" in data:
                 try:
                     heater.update(data["temperature_c"])
@@ -147,7 +142,6 @@ def sensor_loop(sensor, db: DataLogger, interval: float, heater=None) -> None:
             log.warning(
                 f"[{sensor.name}] Read failed ({consecutive_failures}): {e}"
             )
-
             if consecutive_failures >= config.MAX_CONSECUTIVE_FAILURES:
                 log.error(
                     f"[{sensor.name}] {consecutive_failures} consecutive failures. "
@@ -169,32 +163,29 @@ def sensor_loop(sensor, db: DataLogger, interval: float, heater=None) -> None:
 # ---------------------------------------------------------------------------
 
 def build_sensors() -> list:
-    """
-    Instantiate and connect each sensor. If a sensor fails to connect,
-    it is skipped - the program continues without it.
-    """
     sensor_factories = [
         lambda: TemperatureSensor(
-            sensor_id=config.TEMPERATURE_SENSOR_ID
+            sensor_id=config.TEMPERATURE_SENSOR_ID,
         ),
         lambda: CurrentSensor(
-            i2c_address=config.ADS1115_I2C_ADDRESS,
-            channel=config.ADS1115_CHANNEL_CURRENT,
+            i2c_address=config.ADS1015_I2C_ADDRESS,
+            channel=config.ADS1015_CHANNEL_CURRENT,
             sensitivity=config.ACS723_SENSITIVITY_V_PER_A,
             vcc=config.ACS723_VCC,
             sample_count=config.CURRENT_SAMPLE_COUNT,
         ),
         lambda: DOSensor(
-            pwm_pin=config.DO_PWM_PIN,
-            avg_samples=config.DO_AVG_SAMPLES,
-            pulse_timeout_us=config.DO_PULSE_TIMEOUT_US,
+            i2c_address=config.ADS1015_I2C_ADDRESS,
+            channel=config.ADS1015_CHANNEL_DO,
+            sample_count=config.DO_SAMPLE_COUNT,
         ),
         lambda: PARSensor(
-            i2c_address=config.ADS1115_I2C_ADDRESS,
-            channel=config.ADS1115_CHANNEL_PAR,
-            max_voltage=config.PAR_MAX_VOLTAGE_V,
-            max_umol=config.PAR_MAX_UMOL,
+            serial_port=config.PAR_SERIAL_PORT,
+            slave_address=config.PAR_SLAVE_ADDRESS,
+            de_pin=config.PAR_RS485_DE_PIN,
+            baudrate=config.PAR_BAUDRATE,
             sample_count=config.PAR_SAMPLE_COUNT,
+            max_umol=config.PAR_MAX_UMOL,
         ),
         lambda: UVCSensor(
             i2c_address=config.UVC_I2C_ADDRESS,
@@ -229,11 +220,9 @@ def main():
 
     os.makedirs("src/data", exist_ok=True)
 
-    # Open database
     db = DataLogger(config.DB_PATH)
     db.connect()
 
-    # Connect heater controller
     heater = None
     try:
         heater = build_heater_controller()
@@ -243,7 +232,6 @@ def main():
         log.error(f"[heater] Failed to connect - temperature warnings disabled. Error: {e}")
         heater = None
 
-    # Connect sensors
     sensors = build_sensors()
 
     if not sensors:
@@ -253,8 +241,6 @@ def main():
 
     log.info(f"{len(sensors)} sensor(s) active: {[s.name for s in sensors]}")
 
-    # Start one thread per sensor.
-    # The temperature sensor thread gets the heater controller passed in.
     threads = []
     for sensor in sensors:
         t = threading.Thread(

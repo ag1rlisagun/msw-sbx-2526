@@ -2,17 +2,16 @@
 dummy_do_sensor.py - Dummy dissolved oxygen (D.O.) sensor.
 
 PURPOSE:
-    Stand-in for the Atlas Scientific Mini D.O. + Surveyor Analog Isolator.
-    Used when running the pipeline without hardware.
+    Stand-in for the Atlas Scientific Mini D.O. + Surveyor Analog Isolator
+    read via ADS1015 ADC. Used when running the pipeline without hardware.
 
     The real sensor (sensors/real/do_sensor.py) requires:
-      - pigpio daemon running (sudo systemctl start pigpiod)
-      - Surveyor Isolator PWM output wired to a GPIO pin
-      - Physical Atlas Scientific Mini D.O. probe
+      - ADS1015 wired to I2C
+      - Surveyor Isolator analog output on AIN2
+      - adafruit-circuitpython-ads1x15 library
 
-    This dummy simulates the PWM pulse width output as if oxygen levels
-    are near saturation (~55µs pulse → ~1040mV), matching a healthy
-    cyanobacteria culture.
+    This dummy simulates a voltage near saturation (~1040mV), matching
+    a healthy cyanobacteria culture.
 
 HOW TO USE:
     USE_DUMMY_SENSORS=true python3 src/main.py
@@ -24,10 +23,10 @@ from sensors.base_sensor import BaseSensor
 
 
 class DOSensor(BaseSensor):
-    def __init__(self, pwm_pin=17, avg_samples=30, pulse_timeout_us=400):
+    def __init__(self, i2c_address=0x48, channel=2, sample_count=10):
         # All parameters mirror the real sensor - ignored in dummy mode
         super().__init__(name="dissolved_oxygen")
-        self._base_pulse = 55.0  # µs - maps to ~1040mV via (pulse * 20) - 60
+        self._base_voltage_mv = 1040.0  # ~full saturation
 
     def connect(self) -> None:
         self._connected = True
@@ -47,9 +46,8 @@ class DOSensor(BaseSensor):
     def read(self) -> dict:
         if not self._measuring:
             raise RuntimeError(f"[{self.name}] Sensor not measuring.")
-        avg_pulse = self._base_pulse + random.uniform(-2.0, 2.0)
-        voltage_mv = (avg_pulse * 20.0) - 60.0
+        voltage_mv = self._base_voltage_mv + random.uniform(-20.0, 20.0)
+        voltage_mv = max(0.0, voltage_mv)
         return {
-            "avg_pulse_width_us": round(avg_pulse, 3),
-            "voltage_mv": round(max(0.0, voltage_mv), 3),
+            "voltage_mv": round(voltage_mv, 3),
         }

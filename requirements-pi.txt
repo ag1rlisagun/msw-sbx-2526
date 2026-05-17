@@ -9,7 +9,14 @@ adafruit-blinka
 adafruit-circuitpython-ads1x15
 smbus2
 w1thermsensor
-pigpio
-RPi.GPIO           # SSR / relay control via GPIO pin
+RPi.GPIO           # MOSFET heater PWM + MAX485E DE/RE pin control
+
+# PAR sensor - RS-485 MODBUS via MAX485E
+minimalmodbus
+pyserial
+
+# pigpio is no longer required — D.O. sensor now uses ADS1015 ADC
+# If you need pigpio for other purposes, uncomment:
+# pigpio
 
 # Testing (no extra deps needed - uses stdlib unittest)

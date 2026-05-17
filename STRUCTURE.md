@@ -39,13 +39,14 @@ msw-sbx-2526/
 │   │   ├── real/                    # Hardware drivers (run on the Pi)
 │   │   │   ├── temperature_sensor.py    # DS18B20 via 1-Wire (w1thermsensor)
 │   │   │   │                            # Returns: temperature_c
-│   │   │   ├── current_sensor.py        # ACS723 via ADS1115 ADC (I2C 0x48, AIN0)
+│   │   │   ├── current_sensor.py        # ACS723 via ADS1015 ADC (I2C 0x48, AIN0)
 │   │   │   │                            # Returns: voltage_v, current_a
-│   │   │   ├── do_sensor.py             # Atlas Scientific D.O. via PWM (pigpio, GPIO17)
-│   │   │   │                            # Returns: avg_pulse_width_us, voltage_mv
+│   │   │   ├── do_sensor.py             # Atlas Scientific D.O. via ADS1015 ADC (I2C 0x48, AIN2)
+│   │   │   │                            # Returns: voltage_mv
 │   │   │   │                            # voltage_mv → mg/L conversion done post-flight
-│   │   │   ├── par_sensor.py            # SenseCAP PAR via ADS1115 ADC (I2C 0x48, AIN1)
-│   │   │   │                            # Returns: voltage_v, par_umol_m2_s
+│   │   │   ├── par_sensor.py            # SenseCAP PAR via RS-485 MODBUS RTU (MAX485E, UART)
+│   │   │   │                            # Returns: par_umol_m2_s
+│   │   │   │                            # DE/RE on GPIO22, TXD=GPIO14, RXD=GPIO15
 │   │   │   ├── uvc_sensor.py            # MikroE UVC Click via MCP3221 ADC (I2C 0x4D)
 │   │   │   │                            # Returns: voltage_v, intensity_mw_cm2
 │   │   │   └── uvb_sensor.py            # DFRobot SEN0636 UV Index Sensor (I2C 0x23)
@@ -55,7 +56,7 @@ msw-sbx-2526/
 │   │   └── dummy/                   # Software stand-ins - no hardware required
 │   │       ├── dummy_temperature_sensor.py  # Returns ~25°C ± noise
 │   │       ├── dummy_current_sensor.py      # Returns ~50mA ± noise
-│   │       ├── dummy_do_sensor.py           # Returns ~1040µs pulse / ~20760mV
+│   │       ├── dummy_do_sensor.py           # Returns ~1040mV ± noise
 │   │       ├── dummy_par_sensor.py          # Returns ~1200 µmol/m²/s ± noise
 │   │       ├── dummy_uvc_sensor.py          # Returns ~2.3 mW/cm² ± noise
 │   │       └── dummy_uvb_sensor.py          # Returns ~300mV, index ~3 (Moderate)
@@ -63,10 +64,12 @@ msw-sbx-2526/
 │   ├── actuators/
 │   │   └── heater_controller.py     # Heater control interface + two implementations:
 │   │                                #
-│   │                                #   SSRHeaterController - Pi GPIO → SSR control
-│   │                                #     input. On/off hysteresis. Fully implemented.
-│   │                                #     To activate: set HEATER_CONTROLLER = "ssr"
-│   │                                #     and HEATER_SSR_PIN = <pin> in config.py.
+│   │                                #   MOSFETHeaterController - Pi GPIO12/PWM0 →
+│   │                                #     MOSFET gate. PWM duty cycle control.
+│   │                                #     28V CSA supply via buck converter.
+│   │                                #     Mechanical thermostat safety cutoff at 25°C.
+│   │                                #     To activate: set HEATER_CONTROLLER = "mosfet"
+│   │                                #     in config.py.
 │   │                                #
 │   │                                #   PassiveHeaterController - logs warnings only,
 │   │                                #     no commands sent. Current default.
@@ -89,8 +92,8 @@ msw-sbx-2526/
 │   │                                #    range checks, read-before-start.
 │   │
 │   ├── test_heater_controller.py    # 🔲 Stub - PassiveHeaterController tests can be
-│   │                                #    filled in now (no hardware). SSR tests require
-│   │                                #    mocking RPi.GPIO.
+│   │                                #    filled in now (no hardware). MOSFET tests
+│   │                                #    require mocking RPi.GPIO.
 │   │
 │   ├── test_temperature_sensor.py   # 🔲 Stub. See file for what to implement.
 │   ├── test_current_sensor.py       # 🔲 Stub. See file for what to implement.
@@ -102,10 +105,9 @@ msw-sbx-2526/
 │                                    #    tests (no hardware needed).
 │
 ├── tools/
-│   ├── benchmark_adc.py             # Measures real ADS1115 sample rate on the Pi.
-│   │                                # Run once when hardware arrives - result needed
-│   │                                # to confirm SAMPLE_INTERVAL_S is appropriate
-│   │                                # and to report max SPS to Megan.
+│   ├── benchmark_adc.py             # Measures real ADS1015 sample rate on the Pi.
+│   │                                # ⚠ Needs ADS1115→ADS1015 import update before running.
+│   │                                # Run once when hardware arrives.
 │   │                                # Usage: python3 tools/benchmark_adc.py
 │   │
 │   └── analyse_do.py                # Post-flight DO analysis script.
@@ -113,12 +115,6 @@ msw-sbx-2526/
 │                                    # using pre-flight calibration voltage + temperature.
 │                                    # Optional pressure correction for stratosphere data.
 │                                    # Usage: python3 tools/analyse_do.py --db src/data/sensor_data.db --cal <mV>
-│                                    # Run once when hardware arrives - result needed
-│                                    # to confirm SAMPLE_INTERVAL_S is appropriate
-│                                    # and to report max SPS to Megan.
-│                                    # Usage: python3 tools/benchmark_adc.py
-│
-│                                    
 │
 ├── msw-sensors.service              # systemd unit - auto-starts on Pi power-on.
 │                                    # Install: sudo cp msw-sensors.service
@@ -134,7 +130,8 @@ msw-sbx-2526/
 ├── requirements.txt                 # Dev dependencies (Mac / Linux dev machine).
 │                                    # Only black. No Pi hardware libraries.
 ├── requirements-pi.txt              # Full dependencies for the Raspberry Pi.
-│                                    # Includes RPi.GPIO, pigpio, smbus2, etc.
+│                                    # Includes RPi.GPIO, minimalmodbus, smbus2, etc.
+│                                    # pigpio is no longer a hard dependency.
 ├── .gitignore
 └── README.md
 ```
@@ -146,9 +143,9 @@ msw-sbx-2526/
 | Sensor | Interface | Real driver | Dummy | Test stub |
 |---|---|---|---|---|
 | DS18B20 Temperature | 1-Wire, GPIO4 | `real/temperature_sensor.py` | `dummy/dummy_temperature_sensor.py` | `test_temperature_sensor.py` |
-| ACS723 Current | I2C 0x48, AIN0 | `real/current_sensor.py` | `dummy/dummy_current_sensor.py` | `test_current_sensor.py` |
-| Atlas D.O. | PWM, GPIO17 | `real/do_sensor.py` | `dummy/dummy_do_sensor.py` | `test_do_sensor.py` |
-| SenseCAP PAR | I2C 0x48, AIN1 | `real/par_sensor.py` | `dummy/dummy_par_sensor.py` | `test_par_sensor.py` |
+| ACS723 Current | I2C 0x48, ADS1015 AIN0 | `real/current_sensor.py` | `dummy/dummy_current_sensor.py` | `test_current_sensor.py` |
+| Atlas D.O. | I2C 0x48, ADS1015 AIN2 | `real/do_sensor.py` | `dummy/dummy_do_sensor.py` | `test_do_sensor.py` |
+| SenseCAP PAR | RS-485 MODBUS via UART, DE=GPIO22 | `real/par_sensor.py` | `dummy/dummy_par_sensor.py` | `test_par_sensor.py` |
 | MikroE UVC Click | I2C 0x4D | `real/uvc_sensor.py` | `dummy/dummy_uvc_sensor.py` | `test_uvc_sensor.py` |
 | DFRobot SEN0636 UV | I2C 0x23 | `real/uvb_sensor.py` | `dummy/dummy_uvb_sensor.py` | `test_uvb_sensor.py` |
 
@@ -158,7 +155,7 @@ msw-sbx-2526/
 
 | Option | Class | Status | How to activate |
 |---|---|---|---|
-| Solid State Relay | `SSRHeaterController` | ✅ Fully implemented | `HEATER_CONTROLLER = "ssr"`, set `HEATER_SSR_PIN` |
+| MOSFET + PWM | `MOSFETHeaterController` | ✅ Fully implemented | `HEATER_CONTROLLER = "mosfet"` in config.py |
 | Passive monitor | `PassiveHeaterController` | ✅ Fully implemented | `HEATER_CONTROLLER = "passive"` (current default) |
 
 ---
@@ -206,10 +203,11 @@ USE_DUMMY_SENSORS=true python3 src/main.py
 
 | Item | Status |
 |---|---|
-| `HEATER_SSR_PIN` | Not yet assigned - set in `config.py` once wiring is confirmed, then switch `HEATER_CONTROLLER` to `"ssr"` |
-| D.O. calibration | `voltage_mv` is logged; conversion to mg/L is done post-flight using the pre-flight calibration curve |
+| PAR sensor MODBUS | Hardware wiring not fully verified — GPIO22 gets partial response, RO/DI needs confirmation |
+| D.O. calibration | `voltage_mv` is logged; conversion to mg/L done post-flight using pre-flight calibration curve |
+| `benchmark_adc.py` | Needs ADS1115 → ADS1015 import update before running |
 | Per-sensor unit test stubs | Written and documented - implementation pending |
-| ADS1115 max sample rate | Run `tools/benchmark_adc.py` when hardware arrives and report result to Megan |
+| Heater testing | MOSFET + buck converter + thermostat integration test pending (scheduled May 18th) |
 
 ---
 
@@ -217,7 +215,24 @@ USE_DUMMY_SENSORS=true python3 src/main.py
 
 | Script | Purpose | When to run |
 |---|---|---|
-| `tools/benchmark_adc.py` | Measures real ADS1115 sample rate - confirms `SAMPLE_INTERVAL_S` is safe and provides max SPS figure | Once, when Pi and ADS1115 arrive |
-| `tools/analyse_do.py` | Converts raw `voltage_mv` → % saturation and mg/L using pre-flight calibration voltage and temperature data | Post-flight, after recovery |
+| `tools/benchmark_adc.py` | Measures real ADS1015 sample rate — confirms `SAMPLE_INTERVAL_S` is safe | Once, when Pi and ADS1015 arrive |
+| `tools/analyse_do.py` | Converts raw `voltage_mv` → % saturation and mg/L using pre-flight calibration | Post-flight, after recovery |
 
+---
 
+## Change Log
+
+### 2026-05-14 (FRR schematic updates)
+
+| Component | Old | New | Reason |
+|---|---|---|---|
+| Current sensor ADC | ADS1115 (16-bit) | ADS1015 (12-bit) | Electrical team schematic (Figure 6) |
+| D.O. sensor interface | PWM via pigpio on GPIO17 | ADS1015 AIN2 via I2C | Electrical team schematic (Figure 10) — analog isolator output routed through ADC |
+| PAR sensor interface | ADS1115 AIN1 via I2C | RS-485 MODBUS RTU via UART + MAX485E | Electrical team wired RS-485 version (S-PAR-1) instead of voltage version |
+| PAR DE/RE pin | GPIO17 (assumed) | GPIO22 (confirmed by GPIO scan) | Schematic ambiguous; GPIO scan test confirmed GPIO22 |
+| Heater controller | SSR on/off (GPIO HIGH/LOW) | MOSFET + PWM on GPIO12 | FRR schematic (Figure 5) — cartridge heater via buck converter from 28V |
+| Heater thresholds | ON < 24°C, OFF > 26°C | ON < 20°C, OFF > 25°C | FRR presentation explicitly states 20-25°C operating range |
+| pigpio dependency | Required (D.O. PWM) | Optional (no longer needed) | D.O. now reads analog via ADS1015 |
+| UVB sensor | Unchanged | Unchanged | FRR data table + Arduino code both confirm direct I2C @ 0x23 |
+| UVC sensor | Unchanged | Unchanged | No change in FRR schematics |
+| Temperature sensor | Unchanged | Unchanged | No change in FRR schematics |

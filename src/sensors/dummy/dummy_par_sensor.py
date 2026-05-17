@@ -2,13 +2,13 @@
 dummy_par_sensor.py - Dummy PAR (photosynthetically active radiation) sensor.
 
 PURPOSE:
-    Stand-in for the SenseCAP S-PAR-02 PAR sensor read via ADS1115 ADC.
+    Stand-in for the SenseCAP S-PAR-02 PAR sensor via RS-485 MODBUS.
     Used when running the pipeline without hardware.
 
     The real sensor (sensors/real/par_sensor.py) requires:
-      - ADS1115 wired to I2C (shared with current sensor - different channel)
-      - PAR sensor analog output wired to ADS1115 input
-      - adafruit-circuitpython-ads1x15 library
+      - MAX485E transceiver wired to UART (GPIO14/GPIO15)
+      - DE/RE pin on GPIO22
+      - minimalmodbus + pyserial libraries
 
     This dummy simulates moderate indoor light (~1200 µmol/m²/s) with
     small noise, representing a cyanobacteria culture under grow lights.
@@ -23,10 +23,18 @@ from sensors.base_sensor import BaseSensor
 
 
 class PARSensor(BaseSensor):
-    def __init__(self, i2c_address=0x48, channel=1, max_voltage=2.5, max_umol=2500.0, sample_count=10):
+    def __init__(
+        self,
+        serial_port="/dev/serial0",
+        slave_address=0x01,
+        de_pin=22,
+        baudrate=9600,
+        sample_count=3,
+        max_umol=2500.0,
+    ):
         # All parameters mirror the real sensor - ignored in dummy mode
         super().__init__(name="par")
-        self._base_voltage = 1.2  # 1.2V → ~1200 µmol/m²/s
+        self.max_umol = max_umol
 
     def connect(self) -> None:
         self._connected = True
@@ -46,10 +54,8 @@ class PARSensor(BaseSensor):
     def read(self) -> dict:
         if not self._measuring:
             raise RuntimeError(f"[{self.name}] Sensor not measuring.")
-        voltage = self._base_voltage + random.uniform(-0.05, 0.05)
-        voltage = max(0.0, min(voltage, 2.5))  # clamp to valid range
-        par = (voltage / 2.5) * 2500.0
+        par = 1200.0 + random.uniform(-50.0, 50.0)
+        par = max(0.0, min(par, self.max_umol))
         return {
-            "voltage_v": round(voltage, 5),
             "par_umol_m2_s": round(par, 2),
         }

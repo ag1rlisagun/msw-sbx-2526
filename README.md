@@ -19,9 +19,9 @@ Uchenna Ibeziako
 | Sensor | Hardware | Measurement | Interface |
 |---|---|---|---|
 | Temperature | DFRobot Waterproof DS18B20 | Temperature (°C) | 1-Wire |
-| Current | Allegro ACS723 + ADS1115 | Current (A), Voltage (V) | I2C |
-| Dissolved Oxygen | Atlas Scientific Mini D.O. + Surveyor Isolator | Voltage (mV) → mg/L post-flight | PWM (pigpio) |
-| PAR | SenseCAP S-PAR-02 + ADS1115 | PAR (µmol/m²/s) | I2C |
+| Current | Allegro ACS723 + ADS1015 | Current (A), Voltage (V) | I2C |
+| Dissolved Oxygen | Atlas Scientific Mini D.O. + Surveyor Isolator + ADS1015 | Voltage (mV) → mg/L post-flight | I2C |
+| PAR | SenseCAP S-PAR-02 + MAX485E transceiver | PAR (µmol/m²/s) | RS-485 MODBUS RTU via UART |
 | UV-C | MikroE UVC Click (GUVC-T21GH) | Intensity (mW/cm²) | I2C |
 | UV-B/Index | DFRobot SEN0636 Gravity UV Index | UV index (0–11), Risk level (0–4) | I2C |
 
@@ -41,8 +41,7 @@ src/
   sensors/dummy/        - software stand-ins (run anywhere, no hardware needed)
   actuators/            - heater controller interface
   storage/              - SQLite data logger
-  tools/                - benchmark for SAMPLE_INTERVAL_S (run when ADS1115 arrives) 
-                        - post-flight DO conversion voltage_mv → mg/L and % saturation
+  tools/                - post-flight DO analysis, ADC benchmark
   data/                 - sensor_data.db and log file written here at runtime
 tests/                  - unit tests
 ```
@@ -64,11 +63,11 @@ tests/                  - unit tests
 
 | Device | I2C Address | Supply | Notes |
 |---|---|---|---|
-| ADS1115 (ADC) | 0x48 | **5V** | Shared by current sensor (AIN0) and PAR sensor (AIN1) |
+| ADS1015 (ADC) | 0x48 | **5V** | Shared by current sensor (AIN0) and D.O. sensor (AIN2) |
 | MikroE UVC Click | 0x4D | 3.3V | Check VCC SEL jumper - left position = 3.3V |
 | DFRobot SEN0636 | 0x23 | 3.3–5V | **Set physical switch to I2C side before wiring** |
 
-⚠️ **Logic level shifter required:** The ADS1115 must be powered at 5V for the ACS723 current sensor to work correctly. The Pi's I2C lines are 3.3V logic. A bidirectional logic level shifter is needed between the Pi's SDA/SCL pins and the ADS1115 to protect the Pi's GPIO.
+⚠️ **Logic level shifter required:** The ADS1015 must be powered at 5V for the ACS723 current sensor to work correctly. The Pi's I2C lines are 3.3V logic. A bidirectional logic level shifter is needed between the Pi's SDA/SCL pins and the ADS1015 to protect the Pi's GPIO.
 
 Verify all I2C devices after wiring:
 ```
@@ -88,44 +87,65 @@ ls /sys/bus/w1/devices/
 ```
 Expected: `28-xxxxxxxxxxxx`
 
-### PWM input (dissolved oxygen)
+### UART / RS-485 (PAR sensor)
 
-| Device | GPIO Pin (BCM) | Supply | Notes |
+| Connection | GPIO Pin (BCM) | Physical Pin | Notes |
 |---|---|---|---|
-| Atlas Surveyor Isolator PWM out | GPIO17 | 3.3V | pigpiod daemon must be running |
+| MAX485E RO → Pi RXD | GPIO15 | Pin 10 | Data FROM sensor |
+| MAX485E DI → Pi TXD | GPIO14 | Pin 8 | Data TO sensor |
+| MAX485E RE+DE | GPIO22 | Pin 15 | Direction control (TX/RX toggle) |
 
-The Surveyor Analog Isolator converts the D.O. probe's analog voltage to a 10.6 kHz PWM signal. The Pi reads pulse width to determine oxygen level. Raw voltage (mV) is logged; conversion to mg/L is done post-flight using the calibration curve from the pre-flight calibration procedure.
+The MAX485E transceiver converts RS-485 from the SenseCAP S-PAR-02 sensor to UART for the Pi. The sensor speaks MODBUS RTU at 9600 baud, 8N1.
 
-### Analog inputs via ADS1115
+⚠️ **The Pi serial console must be disabled for UART to work:**
+```bash
+sudo raspi-config
+# Interface Options → Serial Port → Login shell over serial: NO → Serial port hardware enabled: YES
+sudo reboot
+```
 
-| Device | ADS1115 Channel | Notes |
+Verify after reboot:
+```bash
+ls -l /dev/serial0    # should point to ttyS0 or ttyAMA0
+```
+
+### Analog inputs via ADS1015
+
+| Device | ADS1015 Channel | Notes |
 |---|---|---|
 | ACS723 current sensor output | AIN0 | Zero-current output = VCC/2 = 2.5V |
-| PAR sensor output | AIN1 | 0–2.5V maps to 0–2500 µmol/m²/s |
+| Surveyor Isolator D.O. output | AIN2 | Via R7 1kΩ + C5 1µF low-pass filter |
 
-### Heater - Solid State Relay (SSR)
+### Heater - MOSFET + PWM (cartridge heater)
 
-The Pi controls the heater via a Solid State Relay on a single GPIO pin. The SSR switches the heater circuit silently with no moving parts and handles the mains load cleanly.
+The Pi controls the heater via a MOSFET gate driven by PWM. Power comes from the 28V CSA supply through a buck converter (LM2576HVS) regulated to ~20-24V. A mechanical thermostat provides hardware safety cutoff at 25°C.
 
 | Connection | Notes |
 |---|---|
-| Pi GPIO pin (HEATER_SSR_PIN) → SSR DC+ | 3.3V GPIO is sufficient to trigger most SSRs |
-| Pi GND → SSR DC- | Common ground |
-| Heater live → SSR AC Load terminal 1 | |
-| Mains live → SSR AC Load terminal 2 | |
-| Heater neutral / mains neutral → direct | Bypass the SSR on the neutral side |
+| Pi GPIO12/PWM0 (pin 32) → MOSFET gate | Via gate resistor |
+| 28V CSA supply → Buck converter → MOSFET drain | Regulated ~20-24V |
+| MOSFET source → Cartridge heater → GND | Immersible in water, ~10W |
+| Mechanical thermostat in series | Hardware cutoff at 25°C |
 
-⚠️ **The SSR load side carries mains voltage.** Have the mains wiring inspected before connecting power.
+To activate: set `HEATER_CONTROLLER = "mosfet"` in `config.py`. The controller uses hysteresis: heater turns ON below 20°C and OFF above 25°C.
 
-To activate: set `HEATER_CONTROLLER = "ssr"` and `HEATER_SSR_PIN = <pin>` in `config.py`. Verify switching with a multimeter across the SSR load terminals before connecting the heater - GPIO HIGH should give near-zero resistance.
+### GPIO pin assignments
 
-The controller uses hysteresis: heater turns ON below `TEMP_TARGET_C - HEATER_HYSTERESIS_C` and OFF above `TEMP_TARGET_C + HEATER_HYSTERESIS_C`. If the SSR is switching too rapidly during testing, increase `HEATER_HYSTERESIS_C` in `config.py`.
+| GPIO (BCM) | Physical Pin | Function |
+|---|---|---|
+| GPIO2 | Pin 3 | I2C SDA (shared bus) |
+| GPIO3 | Pin 5 | I2C SCL (shared bus) |
+| GPIO4 | Pin 7 | DS18B20 1-Wire |
+| GPIO12 | Pin 32 | Heater MOSFET PWM (PWM0) |
+| GPIO14 | Pin 8 | UART TXD (PAR MAX485E DI) |
+| GPIO15 | Pin 10 | UART RXD (PAR MAX485E RO) |
+| GPIO22 | Pin 15 | PAR MAX485E DE/RE |
 
 ---
 
 ## Operating System
 
-**Raspberry Pi OS Lite (64-bit)** - fully supports GPIO, I²C, 1-Wire, Python, and Blinka.
+**Raspberry Pi OS Lite (64-bit)** - fully supports GPIO, I²C, 1-Wire, UART, Python, and Blinka.
 
 ### Write OS to microSD
 
@@ -160,15 +180,9 @@ sudo raspi-config
 Enable all of the following:
 - **I2C** - Interface Options → I2C → Enable
 - **1-Wire** - Interface Options → 1-Wire → Enable
+- **Serial Port** - Interface Options → Serial Port → Login shell: **NO** → Hardware: **YES**
 
 Then reboot when prompted.
-
-Enable and start the pigpio daemon (required for D.O. sensor):
-```bash
-sudo apt install pigpio python3-pigpio -y
-sudo systemctl enable pigpiod
-sudo systemctl start pigpiod
-```
 
 Verify interfaces:
 ```bash
@@ -178,8 +192,8 @@ ls /dev/i2c-*          # expected: /dev/i2c-1
 # 1-Wire (after connecting DS18B20)
 ls /sys/bus/w1/devices/ # expected: 28-xxxxxxxxxxxx
 
-# pigpio
-sudo systemctl status pigpiod  # expected: active (running)
+# UART (for PAR sensor)
+ls -l /dev/serial0      # expected: symlink to ttyS0 or ttyAMA0
 ```
 
 ### Install core tools
@@ -329,13 +343,13 @@ Tests run without hardware using dummy sensors. Completed tests cover the data l
 
 ### ADC Sample Rate Benchmark
 
-The ADS1115 is shared between the current sensor (AIN0) and PAR sensor (AIN1). Its theoretical maximum is 860 SPS but the real achievable rate on the Pi is limited by I2C bus speed and Python overhead. Run this benchmark once when hardware arrives to confirm `SAMPLE_INTERVAL_S` in `config.py` is appropriate.  
+The ADS1015 is shared between the current sensor (AIN0) and D.O. sensor (AIN2). Run this benchmark once when hardware arrives to confirm `SAMPLE_INTERVAL_S` in `config.py` is appropriate.
 
 ```bash
 python3 tools/benchmark_adc.py
 ```
 
-The script reads 500 samples from each active ADC channel, reports the sample rate in SPS, and tells you whether the current `SAMPLE_INTERVAL_S = 1.0` setting is within a safe margin. At 1 second per sample the bar is very low - this is mainly to have the number on record.
+Note: `benchmark_adc.py` currently references ADS1115 — update the import to `ads1015` before running.
 
 ### D.O. Pre-Flight Calibration Procedure
 
@@ -351,8 +365,6 @@ The dissolved oxygen sensor logs raw `voltage_mv` during flight. To convert thos
    - The temperature reading from the DS18B20 at that moment
    - The time of calibration
 5. This is the only number that cannot be recovered after the fact - do not skip it
-
-The Atlas default full-saturation voltage is **440.0 mV** (`40.0 × 11.0` from `do_surveyor.h`). Your probe may read slightly differently - that's exactly why you do this calibration.
 
 ---
 
@@ -421,12 +433,16 @@ All tunable values are in `src/config.py`. Key settings:
 | Setting | Default | Description |
 |---|---|---|
 | `SAMPLE_INTERVAL_S` | `1.0` | Seconds between readings |
-| `DO_PWM_PIN` | `17` | BCM GPIO pin for D.O. PWM input |
+| `ADS1015_I2C_ADDRESS` | `0x48` | I2C address for the ADS1015 (current + D.O.) |
+| `ADS1015_CHANNEL_CURRENT` | `0` | ADS1015 AIN0 for current sensor |
+| `ADS1015_CHANNEL_DO` | `2` | ADS1015 AIN2 for D.O. sensor |
+| `PAR_RS485_DE_PIN` | `22` | BCM GPIO for MAX485E DE/RE direction control |
 | `ACS723_SENSITIVITY_V_PER_A` | `0.400` | **Verify against exact ACS723 part number** |
-| `TEMP_TARGET_C` | `25.0` | Target temperature (used by heater controller) |
-| `TEMP_WARNING_LOW_C` | `18.0` | Log warning below this temperature |
-| `TEMP_WARNING_HIGH_C` | `30.0` | Log warning above this temperature |
-| `HEATER_CONTROLLER` | `"passive"` | `"ssr"`, `"passive"`, or `"serial"` - set to `"ssr"` once `HEATER_SSR_PIN` is assigned |
+| `TEMP_TARGET_C` | `22.5` | Target temperature (midpoint of 20–25°C range) |
+| `TEMP_WARNING_LOW_C` | `20.0` | Heater ON below this temperature |
+| `TEMP_WARNING_HIGH_C` | `25.0` | Heater OFF above this temperature |
+| `HEATER_CONTROLLER` | `"passive"` | `"mosfet"` or `"passive"` |
+| `HEATER_PWM_PIN` | `12` | GPIO12/PWM0 for MOSFET gate |
 
 ---
 
@@ -434,11 +450,12 @@ All tunable values are in `src/config.py`. Key settings:
 
 - [ ] Physical switch on SEN0636 set to **I2C** side
 - [ ] VCC SEL jumper on UVC Click set to correct voltage (left = 3.3V)
-- [ ] Logic level shifter in place between Pi I2C and ADS1115
+- [ ] Logic level shifter in place between Pi I2C and ADS1015
 - [ ] DS18B20 pull-up resistor (4.7kΩ) wired between DATA and 3.3V
 - [ ] `sudo i2cdetect -y 1` shows `0x23`, `0x48`, `0x4D`
 - [ ] `ls /sys/bus/w1/devices/` shows `28-xxxxxxxxxxxx`
-- [ ] `sudo systemctl status pigpiod` shows active
+- [ ] `ls -l /dev/serial0` shows symlink (UART enabled, serial console disabled)
+- [ ] PAR sensor responds to MODBUS test query
 - [ ] ACS723 part number confirmed → correct sensitivity set in `config.py`
 - [ ] D.O. pre-flight calibration completed:
   - Leave probe exposed to open air for 5+ minutes until `voltage_mv` stabilises
@@ -449,12 +466,11 @@ All tunable values are in `src/config.py`. Key settings:
 - [ ] `./run.sh --dummy` runs clean with no errors
 - [ ] `./run.sh` runs on Pi with real hardware - all 6 sensors appear in startup log
 - [ ] Systemd service enabled (`sudo systemctl enable msw-sensors`)
-- [ ] SSR wired: GPIO pin → SSR DC+, GND → SSR DC-, load side wired to heater circuit
-- [ ] `HEATER_SSR_PIN` set in `config.py` to the correct BCM pin number
-- [ ] `HEATER_CONTROLLER = "ssr"` set in `config.py`
-- [ ] SSR switching verified with multimeter before connecting heater to load terminals
+- [ ] MOSFET heater wired: GPIO12 → gate, buck converter output → drain, heater → source
+- [ ] Mechanical thermostat in series with heater (hardware cutoff at 25°C)
+- [ ] `HEATER_CONTROLLER = "mosfet"` set in `config.py`
+- [ ] Heater PWM verified: GPIO12 HIGH heats, LOW stops
 - [ ] SD card formatted and has sufficient space (16 GB+ recommended)
-- [ ] `python3 tools/benchmark_adc.py` run. 
 
 ---
 
@@ -462,7 +478,8 @@ All tunable values are in `src/config.py`. Key settings:
 
 | Item | Status |
 |---|---|
-| Heater controller GPIO pin | `HEATER_SSR_PIN` not yet set in `config.py` - assign a free BCM pin and set `HEATER_CONTROLLER = "ssr"` |
+| PAR sensor MODBUS communication | Hardware wiring not yet fully verified — GPIO22 gets partial response, RO/DI wiring needs confirmation |
 | D.O. calibration to mg/L | Raw voltage (mV) is logged; conversion done post-flight using pre-flight calibration curve |
-| ADS1115 max sample rate | Run `tools/benchmark_adc.py` when hardware arrives |
+| ADS1015 max sample rate | Run `tools/benchmark_adc.py` (update import to ads1015 first) when hardware arrives |
 | Per-sensor unit tests | Stubs written, implementation pending - see `tests/test_*.py` |
+| `benchmark_adc.py` | Needs ADS1115 → ADS1015 import update |
