@@ -4,6 +4,10 @@ Repository for the 2025–2026 CAN-SBX stratospheric balloon experiment. The pay
 
 A Raspberry Pi 4 collects data from six sensors across the full flight. All data is stored locally to an SD card in a SQLite database - no telemetry, no external dependencies.
 
+The system supports two sensor modes:
+- **Direct mode** — the Pi reads all sensors directly through its own GPIO, I2C, and UART interfaces.
+- **Arduino mode** — an Arduino Uno reads all sensors and streams the data to the Pi over USB serial. The Pi parses the serial output and logs to SQLite. Use this mode when the Arduino can reach sensors the Pi cannot (e.g. the PAR sensor via SoftwareSerial RS-485).
+
 ## Software Team
 
 **Lead:** Aaliyah Wusu  
@@ -35,14 +39,16 @@ The short version:
 
 ```
 src/
-  main.py               - entry point, one thread per sensor
+  main.py               - entry point, selects direct or Arduino mode at startup
   config.py             - all pins, addresses, thresholds (edit here, not in sensor files)
-  sensors/real/         - hardware drivers (run on Pi)
+  sensors/real/         - hardware drivers (run on Pi) + arduino_serial_reader.py
   sensors/dummy/        - software stand-ins (run anywhere, no hardware needed)
   actuators/            - heater controller interface
   storage/              - SQLite data logger
   tools/                - post-flight DO analysis, ADC benchmark
   data/                 - sensor_data.db and log file written here at runtime
+arduino/
+  Combinedsensors.ino   - Arduino sketch (upload via Arduino IDE)
 tests/                  - unit tests
 ```
 
@@ -50,10 +56,16 @@ tests/                  - unit tests
 
 ## Hardware Requirements
 
+**Both modes:**
 - Raspberry Pi 4
 - microSD card - 16–32 GB, Class 10 recommended
 - SD card reader
 - Power supply appropriate for Pi 4
+
+**Arduino mode (additional):**
+- Arduino Uno (or compatible board)
+- USB-A to USB-B cable (connects Arduino to Pi)
+- All sensors wired to the Arduino instead of the Pi (same sensors, different host)
 
 ---
 
@@ -231,13 +243,35 @@ pip install -r requirements.txt
 
 ## Running
 
-### Start data collection
+### Direct mode (Pi reads sensors)
 
 ```bash
 ./run.sh
 ```
 
 This activates the virtual environment, installs dependencies if needed, and starts `src/main.py`. Each sensor runs in its own thread. If one sensor fails, the others keep collecting.
+
+### Arduino mode (Arduino reads sensors, Pi logs data)
+
+```bash
+./run.sh --arduino
+```
+
+The Arduino must be connected to the Pi via USB and have `arduino/Combinedsensors.ino` uploaded. On startup the Pi waits for the Arduino to finish initializing its sensors and send `READY`, then sends `START` to begin data collection. No data is lost during boot — the Arduino does not print sensor readings until the Pi is listening.
+
+If the USB connection drops (glitch, Arduino reset), the reader automatically reconnects and re-handshakes.
+
+The serial port defaults to `/dev/ttyACM0`. To check or change it:
+```bash
+ls /dev/ttyACM*                      # find the port
+# edit ARDUINO_SERIAL_PORT in src/config.py if different
+```
+
+If you get a permission error on the serial port:
+```bash
+sudo usermod -aG dialout $USER
+# then log out and back in
+```
 
 ### Dummy mode (no hardware required)
 
@@ -249,8 +283,14 @@ Runs the full pipeline with simulated sensor values. Useful for testing on a lap
 
 ### Auto-start on boot  
 
-Install the systemd service so data collection starts automatically when the Pi receives power, with no manual intervention:
+Install the systemd service so data collection starts automatically when the Pi receives power, with no manual intervention.
 
+For **Arduino mode**, edit `msw-sensors.service` before copying — change the `ExecStart` line to:
+```
+ExecStart=/home/pi/msw-sbx-2526/run.sh --arduino
+```
+
+Then install the service:
 ```bash
 sudo cp msw-sensors.service /etc/systemd/system/
 sudo systemctl daemon-reload
@@ -275,6 +315,8 @@ src/data/msw_sensor.log       - runtime log (warnings, errors, startup messages)
 ```
 
 Each sensor has its own table, created automatically. Every reading is committed immediately - if power cuts mid-flight, all previously committed rows are safe.
+
+**Note:** In Arduino mode, the dissolved oxygen sensor logs `do_percent` (from the Atlas Surveyor's `read_do_percentage()`), while direct mode logs raw `voltage_mv`. The UV sensor data is grouped into a single `uv` table with columns for voltage, index, irradiance, and risk level.
 
 ### Reading the database
 
@@ -432,7 +474,10 @@ All tunable values are in `src/config.py`. Key settings:
 
 | Setting | Default | Description |
 |---|---|---|
-| `SAMPLE_INTERVAL_S` | `1.0` | Seconds between readings |
+| `SENSOR_MODE` | `"direct"` | `"direct"` (Pi reads sensors) or `"arduino"` (Arduino over USB) |
+| `ARDUINO_SERIAL_PORT` | `"/dev/ttyACM0"` | USB serial port for Arduino (only used in Arduino mode) |
+| `ARDUINO_BAUD_RATE` | `115200` | Must match `Serial.begin()` in the `.ino` sketch |
+| `SAMPLE_INTERVAL_S` | `1.0` | Seconds between readings (direct mode only — Arduino mode uses the sketch's `delay()`) |
 | `ADS1015_I2C_ADDRESS` | `0x48` | I2C address for the ADS1015 (current + D.O.) |
 | `ADS1015_CHANNEL_CURRENT` | `0` | ADS1015 AIN0 for current sensor |
 | `ADS1015_CHANNEL_DO` | `2` | ADS1015 AIN2 for D.O. sensor |
@@ -448,14 +493,11 @@ All tunable values are in `src/config.py`. Key settings:
 
 ## Pre-Flight Checklist
 
+### Both modes
+
 - [ ] Physical switch on SEN0636 set to **I2C** side
 - [ ] VCC SEL jumper on UVC Click set to correct voltage (left = 3.3V)
-- [ ] Logic level shifter in place between Pi I2C and ADS1015
 - [ ] DS18B20 pull-up resistor (4.7kΩ) wired between DATA and 3.3V
-- [ ] `sudo i2cdetect -y 1` shows `0x23`, `0x48`, `0x4D`
-- [ ] `ls /sys/bus/w1/devices/` shows `28-xxxxxxxxxxxx`
-- [ ] `ls -l /dev/serial0` shows symlink (UART enabled, serial console disabled)
-- [ ] PAR sensor responds to MODBUS test query
 - [ ] ACS723 part number confirmed → correct sensitivity set in `config.py`
 - [ ] D.O. pre-flight calibration completed:
   - Leave probe exposed to open air for 5+ minutes until `voltage_mv` stabilises
@@ -464,7 +506,6 @@ All tunable values are in `src/config.py`. Key settings:
   - Record the time of calibration
   - Write all of this in your lab notebook - it cannot be recovered after the fact
 - [ ] `./run.sh --dummy` runs clean with no errors
-- [ ] `./run.sh` runs on Pi with real hardware - all 6 sensors appear in startup log
 - [ ] Systemd service enabled (`sudo systemctl enable msw-sensors`)
 - [ ] MOSFET heater wired: GPIO12 → gate, buck converter output → drain, heater → source
 - [ ] Mechanical thermostat in series with heater (hardware cutoff at 25°C)
@@ -472,13 +513,31 @@ All tunable values are in `src/config.py`. Key settings:
 - [ ] Heater PWM verified: GPIO12 HIGH heats, LOW stops
 - [ ] SD card formatted and has sufficient space (16 GB+ recommended)
 
+### Direct mode only
+
+- [ ] Logic level shifter in place between Pi I2C and ADS1015
+- [ ] `sudo i2cdetect -y 1` shows `0x23`, `0x48`, `0x4D`
+- [ ] `ls /sys/bus/w1/devices/` shows `28-xxxxxxxxxxxx`
+- [ ] `ls -l /dev/serial0` shows symlink (UART enabled, serial console disabled)
+- [ ] PAR sensor responds to MODBUS test query
+- [ ] `./run.sh` runs on Pi with real hardware - all 6 sensors appear in startup log
+
+### Arduino mode only
+
+- [ ] `arduino/Combinedsensors.ino` uploaded to Arduino via Arduino IDE
+- [ ] Arduino connected to Pi via USB cable
+- [ ] `ls /dev/ttyACM*` shows the Arduino serial port
+- [ ] `ARDUINO_SERIAL_PORT` in `config.py` matches the port from the step above
+- [ ] All sensors wired to Arduino pins (not to the Pi — see pin assignments in the `.ino`)
+- [ ] `./run.sh --arduino` shows `READY` → `START` → sensor data in the log
+
 ---
 
 ## Known Gaps
 
 | Item | Status |
 |---|---|
-| PAR sensor MODBUS communication | Hardware wiring not yet fully verified — GPIO22 gets partial response, RO/DI wiring needs confirmation |
+| PAR sensor MODBUS communication | Works in Arduino mode (SoftwareSerial RS-485). Direct Pi mode not yet fully verified — GPIO22 gets partial response, RO/DI wiring needs confirmation |
 | D.O. calibration to mg/L | Raw voltage (mV) is logged; conversion done post-flight using pre-flight calibration curve |
 | ADS1015 max sample rate | Run `tools/benchmark_adc.py` (update import to ads1015 first) when hardware arrives |
 | Per-sensor unit tests | Stubs written, implementation pending - see `tests/test_*.py` |

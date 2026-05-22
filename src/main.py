@@ -1,22 +1,18 @@
 """
 main.py - MSW CAN-SBX 2025-2026 sensor collection entry point.
 
-UPDATED 2026-05-14 based on FRR presentation schematics:
-    - Current sensor: ADS1015 (was ADS1115)
-    - D.O. sensor: ADS1015 analog read (was PWM/pigpio)
-    - PAR sensor: RS-485 MODBUS via MAX485E (was ADS1115 I2C)
-    - Heater: MOSFET PWM (was SSR on/off)
-    - UVB, UVC, Temperature: unchanged
+Supports two sensor modes (set SENSOR_MODE in config.py):
 
-Design:
-- Each sensor runs in its own thread. A failure in one sensor thread
-  does not affect any other sensor.
-- Every reading is written to SQLite immediately after it is taken.
-- The logger is shared across threads but is internally thread-safe.
-- On startup, sensors are initialized one by one. If a sensor fails
-  to connect, it is skipped with a warning - the others still run.
-- The temperature sensor thread passes each reading to the heater
-  controller so it can act on it.
+  "direct"  — Each sensor has its own Python driver and runs in its own
+              thread on the Pi.  Original mode.
+
+  "arduino" — An Arduino runs Combinedsensors.ino, reads all sensors, and
+              streams the data over USB serial.  The Pi parses the serial
+              output and logs to SQLite.  Use this when the Arduino can
+              reach sensors the Pi cannot (e.g. SoftwareSerial RS-485 for
+              the PAR sensor).
+
+Both modes share the same DataLogger and heater controller.
 """
 
 import os
@@ -47,11 +43,18 @@ import config
 from storage.data_logger import DataLogger
 
 # ---------------------------------------------------------------------------
-# Sensor imports - real vs dummy selected by environment variable
+# Sensor imports — mode is resolved at startup:
+#   SENSOR_MODE=arduino  →  ArduinoSerialReader (single USB serial stream)
+#   USE_DUMMY_SENSORS=true → dummy drivers (no hardware)
+#   otherwise             → real Pi-attached drivers (direct mode)
 # ---------------------------------------------------------------------------
 USE_DUMMY = os.getenv("USE_DUMMY_SENSORS", "false").lower() == "true"
+SENSOR_MODE = os.getenv("SENSOR_MODE", config.SENSOR_MODE).lower()
 
-if USE_DUMMY:
+if SENSOR_MODE == "arduino":
+    log.info("--- ARDUINO MODE: reading sensors via USB serial ---")
+    from sensors.real.arduino_serial_reader import ArduinoSerialReader
+elif USE_DUMMY:
     log.info("--- DUMMY MODE: no real hardware will be accessed ---")
     from sensors.dummy.dummy_temperature_sensor import TemperatureSensor
     from sensors.dummy.dummy_current_sensor import CurrentSensor
@@ -217,6 +220,7 @@ def build_sensors() -> list:
 
 def main():
     log.info("=== MSW CAN-SBX 2025-2026 Starting ===")
+    log.info(f"Sensor mode: {SENSOR_MODE}")
 
     os.makedirs("src/data", exist_ok=True)
 
@@ -232,6 +236,54 @@ def main():
         log.error(f"[heater] Failed to connect - temperature warnings disabled. Error: {e}")
         heater = None
 
+    if SENSOR_MODE == "arduino":
+        _run_arduino_mode(db, heater)
+    else:
+        _run_direct_mode(db, heater)
+
+    if heater is not None:
+        try:
+            heater.disconnect()
+        except Exception as e:
+            log.warning(f"[heater] Error during shutdown: {e}")
+
+    db.disconnect()
+    log.info("=== MSW CAN-SBX 2025-2026 Shutdown complete ===")
+
+
+# ---------------------------------------------------------------------------
+# Arduino mode — single serial reader thread
+# ---------------------------------------------------------------------------
+
+def _run_arduino_mode(db: DataLogger, heater) -> None:
+    reader = ArduinoSerialReader(
+        port=config.ARDUINO_SERIAL_PORT,
+        baud=config.ARDUINO_BAUD_RATE,
+        db=db,
+        heater=heater,
+        shutdown_event=_shutdown,
+        reconnect_delay=config.ARDUINO_RECONNECT_DELAY_S,
+    )
+
+    t = threading.Thread(
+        target=reader.run,
+        name="thread-arduino",
+        daemon=True,
+    )
+    t.start()
+
+    log.info("Collection running (Arduino mode). Send SIGTERM or Ctrl-C to stop.")
+    _shutdown.wait()
+
+    log.info("Shutdown signal received.")
+    t.join(timeout=10)
+
+
+# ---------------------------------------------------------------------------
+# Direct mode — one thread per sensor (original behaviour)
+# ---------------------------------------------------------------------------
+
+def _run_direct_mode(db: DataLogger, heater) -> None:
     sensors = build_sensors()
 
     if not sensors:
@@ -253,7 +305,7 @@ def main():
         t.start()
         threads.append(t)
 
-    log.info("Collection running. Send SIGTERM or Ctrl-C to stop.")
+    log.info("Collection running (direct mode). Send SIGTERM or Ctrl-C to stop.")
     _shutdown.wait()
 
     log.info("Shutdown signal received - stopping sensors.")
@@ -265,17 +317,8 @@ def main():
         except Exception as e:
             log.warning(f"[{sensor.name}] Error during shutdown: {e}")
 
-    if heater is not None:
-        try:
-            heater.disconnect()
-        except Exception as e:
-            log.warning(f"[heater] Error during shutdown: {e}")
-
     for t in threads:
         t.join(timeout=10)
-
-    db.disconnect()
-    log.info("=== MSW CAN-SBX 2025-2026 Shutdown complete ===")
 
 
 if __name__ == "__main__":

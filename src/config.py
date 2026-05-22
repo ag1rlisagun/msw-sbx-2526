@@ -15,6 +15,27 @@ UPDATED 2026-05-14 based on FRR presentation schematics:
 """
 
 # ---------------------------------------------------------------------------
+# Sensor mode: "direct" (Pi reads hardware) or "arduino" (Arduino over USB)
+# ---------------------------------------------------------------------------
+# "direct"  — original mode. Each sensor has its own Python driver and thread.
+# "arduino" — Arduino runs Combinedsensors.ino and streams readings over USB
+#             serial. The Pi parses the serial output and logs to SQLite.
+#             Use this when the Arduino can reach sensors the Pi cannot (e.g.
+#             SoftwareSerial RS-485 for the PAR sensor).
+
+SENSOR_MODE = "direct"
+
+# ---------------------------------------------------------------------------
+# Arduino serial settings (only used when SENSOR_MODE = "arduino")
+# ---------------------------------------------------------------------------
+# Port: /dev/ttyACM0 on Linux, /dev/cu.usbmodem* on Mac, COM3 on Windows.
+# Baud must match Serial.begin() in the .ino sketch (115200).
+
+ARDUINO_SERIAL_PORT = "/dev/ttyACM0"
+ARDUINO_BAUD_RATE = 115200
+ARDUINO_RECONNECT_DELAY_S = 5.0
+
+# ---------------------------------------------------------------------------
 # Data storage
 # ---------------------------------------------------------------------------
 

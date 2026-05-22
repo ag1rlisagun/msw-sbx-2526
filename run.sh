@@ -3,14 +3,19 @@
 set -e
 
 USE_DUMMY=false
+USE_ARDUINO=false
 
-if [[ "$1" == "--dummy" ]]; then
-  USE_DUMMY=true
-elif [[ -n "$1" ]]; then
-  echo "[!] Unknown option: $1"
-  echo "Usage: ./run.sh [--dummy]"
-  exit 1
-fi
+for arg in "$@"; do
+  case "$arg" in
+    --dummy)   USE_DUMMY=true ;;
+    --arduino) USE_ARDUINO=true ;;
+    *)
+      echo "[!] Unknown option: $arg"
+      echo "Usage: ./run.sh [--dummy | --arduino]"
+      exit 1
+      ;;
+  esac
+done
 
 # Setup virtual environment
 if [ ! -d "venv" ]; then
@@ -40,6 +45,9 @@ echo "Starting MSW sensor collection..."
 if $USE_DUMMY; then
   echo "(DUMMY MODE - no hardware required)"
   USE_DUMMY_SENSORS=true python3 src/main.py
+elif $USE_ARDUINO; then
+  echo "(ARDUINO MODE - reading sensors via USB serial)"
+  SENSOR_MODE=arduino python3 src/main.py
 else
   python3 src/main.py
 fi
