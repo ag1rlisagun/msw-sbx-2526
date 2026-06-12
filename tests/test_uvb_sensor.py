@@ -52,21 +52,54 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from sensors.dummy.dummy_uvb_sensor import UVBSensor
+from sensors.real.uvb_sensor import UVBSensor as RealUVBsensor
+
+def lifecycle() -> dict:
+    sensor = UVBSensor()
+    sensor.connect()
+    sensor.start()
+    data = sensor.read()
+    sensor.stop()
+    sensor.disconnect()
+    return data
+
+def sensor_for_read() -> UVBSensor:
+    sensor = UVBSensor()
+    sensor.connect()
+    sensor.start()
+    return sensor
+
+def end_for_read(sensor):
+    sensor.stop()
+    sensor.disconnect()
+    
 
 
 class TestUVBSensorLifecycle(unittest.TestCase):
 
     def test_connect_and_read(self):
-        # TODO: full lifecycle completes without error and returns expected keys
-        pass
+        #full lifecycle completes without error and returns expected keys
+        data = lifecycle()
+        self.assertIsInstance(data, dict)
+        self.assertIn("uv_voltage_mv", data)
+        self.assertIn("uv_index", data)
+        self.assertIn("uv_risk_level", data)
 
     def test_read_before_start_raises(self):
-        # TODO: RuntimeError if read() is called before start()
-        pass
+        #RuntimeError if read() is called before start()
+
+        sensor = UVBSensor()
+        sensor.connect()
+        with self.assertRaises(RuntimeError):
+            sensor.read()
+        end_for_read(sensor)
+        
 
     def test_start_before_connect_raises(self):
-        # TODO: RuntimeError if start() is called before connect()
-        pass
+        #RuntimeError if start() is called before connect()
+        sensor = UVBSensor()
+        with self.assertRaises(RuntimeError):
+            sensor.start()
 
 
 class TestUVBSensorOutput(unittest.TestCase):
@@ -78,20 +111,50 @@ class TestUVBSensorOutput(unittest.TestCase):
         return s
 
     def test_output_keys(self):
-        # TODO: verify "uv_voltage_mv", "uv_index", "uv_risk_level" all present
-        pass
+        #verify "uv_voltage_mv", "uv_index", "uv_risk_level" all present
+        data = lifecycle()
+        self.assertIsInstance(data, dict)
+        self.assertIn("uv_voltage_mv", data)
+        self.assertIn("uv_index", data)
+        self.assertIn("uv_risk_level", data)
 
     def test_uv_index_within_who_range(self):
-        # TODO: run 20 reads, verify 0.0 <= uv_index <= 11.0 every time
-        pass
+        #run 20 reads, verify 0.0 <= uv_index <= 11.0 every time
+       
+        sensor = self._make_and_start()
+
+        for i in range(20):
+            data = sensor.read()
+            self.assertGreaterEqual(data["uv_index"], 0.0)
+            self.assertLessEqual(data["uv_index"], 11.0)
+        
+        end_for_read(sensor)
+
 
     def test_risk_level_within_range(self):
-        # TODO: run 20 reads, verify uv_risk_level is an int in {0, 1, 2, 3, 4}
-        pass
+        #run 20 reads, verify uv_risk_level is an int in {0, 1, 2, 3, 4}
+        
+        check = [0,1,2,3,4]
+        
+        sensor = self._make_and_start()
+        for i in range(20):
+            data = sensor.read()
+            self.assertIn("uv_risk_level", data)
+            self.assertIsInstance(data["uv_risk_level"], int)
+            self.assertIn(data["uv_risk_level"], check)
+
+        end_for_read(sensor)
 
     def test_voltage_non_negative(self):
-        # TODO: run 20 reads, verify uv_voltage_mv >= 0 every time
-        pass
+        #run 20 reads, verify uv_voltage_mv >= 0 every time
+
+        sensor = self._make_and_start()
+        for i in range(20):
+            data = sensor.read()
+            self.assertGreaterEqual(data["uv_voltage_mv"], 0)
+
+        end_for_read(sensor)
+
 
     def test_risk_level_consistent_with_index(self):
         # TODO: for each read, verify risk_level matches index using this table:
@@ -101,7 +164,27 @@ class TestUVBSensorOutput(unittest.TestCase):
         #   8 <= index < 11 → risk 3
         #   index >= 11 → risk 4
         # This is the most important test - catches calibration errors.
-        pass
+       
+        sensor = self._make_and_start()
+        for i in range(20):
+            data = sensor.read()
+            if data["uv_index"] < 3:
+                self.assertEqual(data["uv_risk_level"], 0)
+            elif 3 <= data["uv_index"] < 6:
+                self.assertEqual(data["uv_risk_level"], 1)
+            elif 6 <= data["uv_index"] < 8:
+                self.assertEqual(data["uv_risk_level"], 2)
+            elif 8 <= data["uv_index"] < 11:
+                self.assertEqual(data["uv_risk_level"], 3)
+            elif data["uv_index"] >= 11:
+                self.assertEqual(data["uv_risk_level"], 4)
+
+        end_for_read(sensor)
+            
+            
+
+
+       
 
 
 class TestSEN0636RegisterParsing(unittest.TestCase):
@@ -124,7 +207,11 @@ class TestSEN0636RegisterParsing(unittest.TestCase):
         #       s.connect()
         #       result = s._read_register(0x10)
         #       self.assertEqual(result, 300)
-        pass
+        """sensor = RealUVBsensor()
+        sensor.connect()
+        result = sensor. _read_register(0x10)
+        self.assertEqual(result, 300) """
+
 
     def test_zero_bytes_give_zero(self):
         # TODO: [0x00, 0x00] → value = 0
