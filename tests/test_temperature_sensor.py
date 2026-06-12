@@ -46,42 +46,72 @@ from sensors.dummy.dummy_temperature_sensor import TemperatureSensor
 class TestTemperatureSensorLifecycle(unittest.TestCase):
 
     def test_connect_and_read(self):
-        # TODO: verify connect → start → read → stop → disconnect completes
-        # without error and returns a dict containing "temperature_c"
-        pass
+        sensor = TemperatureSensor()
+        sensor.connect()
+        sensor.start()
+        data = sensor.read()
+        self.assertIn("temperature_c", data)
+        sensor.stop()
+        sensor.disconnect()
 
     def test_read_before_start_raises(self):
-        # TODO: verify RuntimeError is raised if read() is called before start()
-        pass
+        sensor = TemperatureSensor()
+        sensor.connect()
+        with self.assertRaises(RuntimeError):
+            sensor.read()
+        sensor.disconnect()
 
     def test_start_before_connect_raises(self):
-        # TODO: verify RuntimeError is raised if start() is called before connect()
-        pass
+        sensor = TemperatureSensor()
+        with self.assertRaises(RuntimeError):
+            sensor.start()
 
     def test_context_manager(self):
-        # TODO: verify the 'with' statement calls connect() and disconnect()
-        # correctly, and that the sensor reads inside the block
-        pass
+        with TemperatureSensor() as s:
+            data = s.read()
+            self.assertIn("temperature_c", data)
 
 
 class TestTemperatureSensorOutput(unittest.TestCase):
 
     def test_output_contains_temperature_key(self):
-        # TODO: verify read() returns a dict with key "temperature_c"
-        pass
+        sensor = TemperatureSensor()
+        sensor.connect()
+        sensor.start()
+        data = sensor.read()
+        self.assertIn("temperature_c", data)
+        sensor.stop()
+        sensor.disconnect()
 
     def test_temperature_is_float(self):
-        # TODO: verify the returned temperature_c value is a float (not int, not None)
-        pass
+        sensor = TemperatureSensor()
+        sensor.connect()
+        sensor.start()
+        data = sensor.read()
+        self.assertIsInstance(data["temperature_c"], float)
+        sensor.stop()
+        sensor.disconnect()
 
     def test_temperature_within_reasonable_range(self):
-        # TODO: verify temperature_c is between -10.0 and 60.0 over many reads
-        # (the dummy won't drift far, but this catches formula bugs in the real sensor)
-        pass
+        sensor = TemperatureSensor()
+        sensor.connect()
+        sensor.start()
+        for _ in range(10):
+            data = sensor.read()
+            self.assertGreaterEqual(data["temperature_c"], -10.0)
+            self.assertLessEqual(data["temperature_c"], 60.0)
+        sensor.stop()
+        sensor.disconnect()
 
     def test_multiple_reads_succeed(self):
-        # TODO: verify read() can be called 10+ times without error or state corruption
-        pass
+        sensor = TemperatureSensor()
+        sensor.connect()
+        sensor.start()
+        for _ in range(10):
+            data = sensor.read()
+            self.assertIn("temperature_c", data)
+        sensor.stop()
+        sensor.disconnect()
 
 
 if __name__ == "__main__":
