@@ -22,6 +22,14 @@ int PAR;
 // ===== UV Sensor =====
 DFRobot_UVIndex240370Sensor UVIndex240370Sensor(&Wire);
 
+// ===== UV-C Sensor (MikroE UVC Click, MCP3221 ADC) =====
+// Shares the same I2C bus (Wire) as the UV Index sensor above.
+// NOTE: verify this address doesn't collide with any other I2C device
+// on the Arduino's bus before flight (SEN0636 is on 0x23, this is 0x4D).
+#define UVC_I2C_ADDRESS        0x4D
+const float UVC_VCC                = 3.3;
+const float UVC_CALIBRATION_FACTOR = 2.9;
+
 // ===== UV Data Struct =====
 struct UVData {
   uint16_t voltage;
@@ -59,6 +67,7 @@ float readTemperature();
 float readCurrent();
 float readDO();
 UVData readUV();
+void readUVC(float &voltage, float &intensity);
 void readPAR();
 void handleDOCommands();
 void parse_cmd(char* string);
@@ -100,6 +109,8 @@ void loop() {
   float do_value        = readDO();
   readPAR();
   UVData uvReading      = readUV();
+  float uvcVoltage, uvcIntensity;
+  readUVC(uvcVoltage, uvcIntensity);
 
   Serial.print(F("Temp: "));          Serial.print(temperature, 2);      Serial.println(F(" °C"));
   Serial.print(F("PAR: "));           Serial.print(PAR);                  Serial.println(F(" umol/m²·s"));
@@ -109,6 +120,8 @@ void loop() {
   Serial.print(F("UV Index: "));      Serial.println(uvReading.index);
   Serial.print(F("UV Irradiance: ")); Serial.print(uvReading.watts, 3);   Serial.println(F(" W/m²"));
   Serial.print(F("Risk Level: "));    Serial.println(riskLevelStr(uvReading.level));
+  Serial.print(F("UVC Voltage: "));   Serial.print(uvcVoltage, 5);        Serial.println(F(" V"));
+  Serial.print(F("UVC Intensity: ")); Serial.print(uvcIntensity, 5);      Serial.println(F(" mW/cm2"));
   Serial.println(F("---"));
 
   delay(1000);
@@ -196,6 +209,26 @@ UVData readUV() {
   uvReading.level   = UVIndex240370Sensor.readRiskLevelData();
   uvReading.watts   = uvReading.index * 0.025;
   return uvReading;
+}
+
+// NEW: UV-C sensor read (MikroE UVC Click / MCP3221 12-bit ADC over I2C).
+// Same protocol as sensors/real/uvc_sensor.py on the Pi: request 2 bytes,
+// mask the top nibble of the first byte, combine to a 12-bit value.
+void readUVC(float &voltage, float &intensity) {
+  Wire.requestFrom(UVC_I2C_ADDRESS, 2);
+  if (Wire.available() == 2) {
+    uint8_t b0 = Wire.read();
+    uint8_t b1 = Wire.read();
+    uint16_t adc = ((b0 & 0x0F) << 8) | b1;   // 12-bit, top nibble masked
+    voltage = (adc / 4096.0) * UVC_VCC;
+    intensity = voltage * UVC_CALIBRATION_FACTOR;
+  } else {
+    // Sensor not responding — report a sentinel the Pi-side parser can
+    // still log without crashing (matches the -1.0 placeholder pattern
+    // used elsewhere in this sketch, e.g. readTemperature()).
+    voltage = -1.0;
+    intensity = -1.0;
+  }
 }
 
 void readPAR() {

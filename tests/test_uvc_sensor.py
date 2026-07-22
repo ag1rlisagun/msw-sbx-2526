@@ -23,6 +23,13 @@ WHAT TO TEST HERE:
 
     6. READ BEFORE START - must raise RuntimeError.
 
+    ARDUINO MODE NOTE:
+        This sensor is now also read on the Arduino side (readUVC() in
+        arduino/Combinedsensors.ino), using the same bit math and the
+        same output keys ("voltage_v", "intensity_mw_cm2"). These tests
+        only exercise the dummy/direct-mode Python driver, but the
+        "uvc" table schema should be identical regardless of mode.
+
     FUTURE (requires Pi hardware):
     7. I2C ADDRESS DETECTION - verify MCP3221 appears at 0x4D using
        i2cdetect before running.

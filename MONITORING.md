@@ -52,12 +52,18 @@ UNION SELECT 'uvb',               COUNT(*) FROM uvb;
 ## Sensor tables
 
 | Table               | Columns                              |
-|---------------------|--------------------------------------|
+|---------------------|---------------------------------------|
 | `temperature`       | `temperature_c`                      |
 | `current`           | `voltage_v`, `current_a`             |
-| `dissolved_oxygen`  | `voltage_mv`                         |
+| `dissolved_oxygen`  | `voltage_mv` (direct/dummy mode) **or** `do_percent` (Arduino mode) |
 | `par`               | `par_umol_m2_s`                      |
-| `uvc`               | `intensity_mw_cm2`                   |
-| `uvb`               | `uv_index`, `risk_level`             |
+| `uvc`               | `voltage_v`, `intensity_mw_cm2`      |
+| `uvb`               | `uv_voltage_mv`, `uv_index`, `uv_risk_level` |
 
 All tables also have `id` and `timestamp`.
+
+**Note:** the `dissolved_oxygen` table's schema depends on which sensor
+mode collected the data — direct/dummy mode logs a raw `voltage_mv` value
+that needs post-flight calibration, while Arduino mode logs an
+already-calibrated `do_percent` value from the Atlas Surveyor library.
+`tools/analyse_do.py` detects and handles both automatically.

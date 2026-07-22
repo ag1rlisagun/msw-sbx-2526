@@ -12,6 +12,13 @@ UPDATED 2026-05-14 based on FRR presentation schematics:
     - UVB sensor: unchanged (direct I2C @ 0x23)
     - UVC sensor: unchanged (MCP3221 @ 0x4D)
     - Temperature sensor: unchanged (1-Wire)
+
+UPDATED (Arduino/Pi integration pass):
+    - Combinedsensors.ino now reads UV-C (MCP3221) in addition to the
+      other five sensors, so Arduino mode covers all six sensors again.
+    - tools/analyse_do.py now handles both DO schemas (voltage_mv from
+      direct mode / dummy, do_percent from Arduino mode) instead of
+      assuming voltage_mv unconditionally.
 """
 
 # ---------------------------------------------------------------------------
@@ -78,6 +85,10 @@ CURRENT_SAMPLE_COUNT = 10
 # via R7 (1kΩ) + C5 (1µF) low-pass filter.
 #
 # pigpiod is NO LONGER required for D.O.
+#
+# NOTE: direct mode logs "voltage_mv" (raw, needs post-flight calibration).
+# Arduino mode logs "do_percent" (Atlas Surveyor library, calibrated
+# on-device). tools/analyse_do.py handles both.
 
 DO_SAMPLE_COUNT = 10
 
@@ -104,7 +115,9 @@ PAR_SAMPLE_COUNT = 3
 # ---------------------------------------------------------------------------
 # UV-C sensor - MikroE UVC Click (GUVC-T21GH via MCP3221 ADC)
 # ---------------------------------------------------------------------------
-# NO CHANGE from original design.
+# NO CHANGE from original design in direct mode. Now also read in Arduino
+# mode (readUVC() in Combinedsensors.ino) over the same I2C bus as the UV
+# Index sensor — no extra Arduino pins required.
 
 UVC_I2C_ADDRESS = 0x4D
 UVC_VCC = 3.3

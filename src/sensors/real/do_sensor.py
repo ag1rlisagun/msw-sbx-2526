@@ -13,7 +13,14 @@ Wiring (from schematic):
 
 The isolator outputs a voltage proportional to dissolved oxygen.
 Raw voltage_mv is logged; conversion to mg/L is done post-flight
-using the pre-flight calibration curve.
+using the pre-flight calibration curve (see tools/analyse_do.py).
+
+NOTE ON MODES: this "voltage_mv" schema is specific to direct mode (this
+file) and the dummy sensor. Arduino mode instead uses the Atlas Surveyor
+Arduino library's read_do_percentage() and logs "do_percent" directly,
+since that library already calibrates on-device. tools/analyse_do.py
+detects which schema a given database has and handles both — see that
+file if you're doing post-flight analysis.
 
 IMPORTANT - I2C ADDRESS:
     The ADS1015 may be shared with the current sensor (AIN0).

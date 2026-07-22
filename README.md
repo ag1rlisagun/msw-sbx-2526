@@ -6,7 +6,7 @@ A Raspberry Pi 4 collects data from six sensors across the full flight. All data
 
 The system supports two sensor modes:
 - **Direct mode** — the Pi reads all sensors directly through its own GPIO, I2C, and UART interfaces.
-- **Arduino mode** — an Arduino Uno reads all sensors and streams the data to the Pi over USB serial. The Pi parses the serial output and logs to SQLite. Use this mode when the Arduino can reach sensors the Pi cannot (e.g. the PAR sensor via SoftwareSerial RS-485).
+- **Arduino mode** — an Arduino Uno reads all sensors and streams the data to the Pi over USB serial. The Pi parses the serial output and logs to SQLite. Use this mode when the Arduino can reach sensors the Pi cannot (e.g. the PAR sensor via SoftwareSerial RS-485). As of the current sketch, Arduino mode covers all six sensors, including UV-C.
 
 ## Software Team
 
@@ -24,10 +24,12 @@ Uchenna Ibeziako
 |---|---|---|---|
 | Temperature | DFRobot Waterproof DS18B20 | Temperature (°C) | 1-Wire |
 | Current | Allegro ACS723 + ADS1015 | Current (A), Voltage (V) | I2C |
-| Dissolved Oxygen | Atlas Scientific Mini D.O. + Surveyor Isolator + ADS1015 | Voltage (mV) → mg/L post-flight | I2C |
+| Dissolved Oxygen | Atlas Scientific Mini D.O. + Surveyor Isolator + ADS1015 | Voltage (mV) → mg/L post-flight (direct mode); % saturation on-device (Arduino mode) | I2C (direct) / analog via Arduino (Arduino mode) |
 | PAR | SenseCAP S-PAR-02 + MAX485E transceiver | PAR (µmol/m²/s) | RS-485 MODBUS RTU via UART |
 | UV-C | MikroE UVC Click (GUVC-T21GH) | Intensity (mW/cm²) | I2C |
 | UV-B/Index | DFRobot SEN0636 Gravity UV Index | UV index (0–11), Risk level (0–4) | I2C |
+
+**Note on Dissolved Oxygen:** direct mode logs a raw `voltage_mv` value that needs post-flight calibration (see `tools/analyse_do.py`). Arduino mode logs `do_percent` from the Atlas Surveyor Arduino library, which calibrates on-device via its own "CAL" serial command — no post-flight calibration voltage is needed for that schema. `tools/analyse_do.py` auto-detects which schema a given database uses.
 
 ---
 
@@ -48,7 +50,7 @@ src/
   tools/                - post-flight DO analysis, ADC benchmark
   data/                 - sensor_data.db and log file written here at runtime
 arduino/
-  Combinedsensors.ino   - Arduino sketch (upload via Arduino IDE)
+  Combinedsensors.ino   - Arduino sketch (upload via Arduino IDE) - reads all 6 sensors
 tests/                  - unit tests
 ```
 
@@ -75,13 +77,13 @@ tests/                  - unit tests
 
 | Device | I2C Address | Supply | Notes |
 |---|---|---|---|
-| ADS1015 (ADC) | 0x48 | **5V** | Shared by current sensor (AIN0) and D.O. sensor (AIN2) |
-| MikroE UVC Click | 0x4D | 3.3V | Check VCC SEL jumper - left position = 3.3V |
+| ADS1015 (ADC) | 0x48 | **5V** | Shared by current sensor (AIN0) and D.O. sensor (AIN2). Direct mode only. |
+| MikroE UVC Click | 0x4D | 3.3V | Check VCC SEL jumper - left position = 3.3V. Read by the Pi in direct mode, or by the Arduino (same address, same Wire bus as the UV Index sensor) in Arduino mode. |
 | DFRobot SEN0636 | 0x23 | 3.3–5V | **Set physical switch to I2C side before wiring** |
 
-⚠️ **Logic level shifter required:** The ADS1015 must be powered at 5V for the ACS723 current sensor to work correctly. The Pi's I2C lines are 3.3V logic. A bidirectional logic level shifter is needed between the Pi's SDA/SCL pins and the ADS1015 to protect the Pi's GPIO.
+⚠️ **Logic level shifter required (direct mode only):** The ADS1015 must be powered at 5V for the ACS723 current sensor to work correctly. The Pi's I2C lines are 3.3V logic. A bidirectional logic level shifter is needed between the Pi's SDA/SCL pins and the ADS1015 to protect the Pi's GPIO.
 
-Verify all I2C devices after wiring:
+Verify all I2C devices after wiring (direct mode):
 ```
 sudo i2cdetect -y 1
 ```
@@ -121,7 +123,7 @@ Verify after reboot:
 ls -l /dev/serial0    # should point to ttyS0 or ttyAMA0
 ```
 
-### Analog inputs via ADS1015
+### Analog inputs via ADS1015 (direct mode)
 
 | Device | ADS1015 Channel | Notes |
 |---|---|---|
@@ -141,7 +143,7 @@ The Pi controls the heater via a MOSFET gate driven by PWM. Power comes from the
 
 To activate: set `HEATER_CONTROLLER = "mosfet"` in `config.py`. The controller uses hysteresis: heater turns ON below 20°C and OFF above 25°C.
 
-### GPIO pin assignments
+### GPIO pin assignments (Pi, direct mode)
 
 | GPIO (BCM) | Physical Pin | Function |
 |---|---|---|
@@ -152,6 +154,19 @@ To activate: set `HEATER_CONTROLLER = "mosfet"` in `config.py`. The controller u
 | GPIO14 | Pin 8 | UART TXD (PAR MAX485E DI) |
 | GPIO15 | Pin 10 | UART RXD (PAR MAX485E RO) |
 | GPIO22 | Pin 15 | PAR MAX485E DE/RE |
+
+### Arduino pin assignments (Arduino mode)
+
+See `arduino/Combinedsensors.ino` for the authoritative pin list. Summary:
+
+| Device | Arduino Pin | Notes |
+|---|---|---|
+| DS18B20 temperature | Digital pin 5 | 1-Wire |
+| ACS723 current sensor | A2 | Analog read |
+| DO probe (Surveyor Isolator) | A0 | Analog read |
+| PAR sensor (RS-485) | SoftwareSerial pins 2/3, DE/RE on pin 4 | MODBUS RTU |
+| UV Index (SEN0636) | I2C (Wire) | Address 0x23 |
+| UV-C (MCP3221) | I2C (Wire), shares bus with UV Index | Address 0x4D |
 
 ---
 
@@ -316,7 +331,7 @@ src/data/msw_sensor.log       - runtime log (warnings, errors, startup messages)
 
 Each sensor has its own table, created automatically. Every reading is committed immediately - if power cuts mid-flight, all previously committed rows are safe.
 
-**Note:** In Arduino mode, the dissolved oxygen sensor logs `do_percent` (from the Atlas Surveyor's `read_do_percentage()`), while direct mode logs raw `voltage_mv`. The UV sensor data is grouped into a single `uv` table with columns for voltage, index, irradiance, and risk level.
+**Note:** In Arduino mode, the dissolved oxygen sensor logs `do_percent` (from the Atlas Surveyor's `read_do_percentage()`, calibrated on-device), while direct mode logs raw `voltage_mv` (needs post-flight calibration — see `tools/analyse_do.py`). The UV Index sensor data is grouped into a single `uv` table with columns for voltage, index, irradiance, and risk level. The UV-C sensor writes to its own `uvc` table with `voltage_v` and `intensity_mw_cm2` columns, identical in both direct and Arduino modes.
 
 ### Reading the database
 
@@ -337,11 +352,14 @@ SELECT datetime(timestamp, 'unixepoch'), temperature_c
 FROM temperature
 ORDER BY timestamp;
 
+-- Check which DO schema this database uses
+.schema dissolved_oxygen
+
 -- See current and DO readings together by time
 SELECT
   datetime(c.timestamp, 'unixepoch') AS time,
   c.current_a,
-  d.voltage_mv
+  d.*
 FROM current c
 JOIN dissolved_oxygen d ON ABS(c.timestamp - d.timestamp) < 2
 ORDER BY c.timestamp;
@@ -377,7 +395,7 @@ sqlite3 -header -csv src/data/sensor_data.db \
 PYTHONPATH=src python3 -m unittest discover -s tests -p "test_*.py" -v
 ```
 
-Tests run without hardware using dummy sensors. Completed tests cover the data logger (thread safety, SQLite correctness) and the full sensor lifecycle contract. Per-sensor test stubs in `tests/test_*.py` are ready to be filled in - each file has comments describing exactly what to implement.
+Tests run without hardware using dummy sensors. Completed tests cover the data logger (thread safety, SQLite correctness) and the full sensor lifecycle contract. Per-sensor test stubs in `tests/test_*.py` are ready to be filled in - each file has comments describing exactly what to implement, and each has been checked against the current (post-FRR) hardware, so the described formulas/schemas match what the drivers actually do.
 
 ---
 
@@ -395,7 +413,7 @@ Note: `benchmark_adc.py` currently references ADS1115 — update the import to `
 
 ### D.O. Pre-Flight Calibration Procedure
 
-The dissolved oxygen sensor logs raw `voltage_mv` during flight. To convert those voltages to mg/L after recovery, you need a single reference point recorded before launch.
+**Direct / dummy mode:** the dissolved oxygen sensor logs raw `voltage_mv` during flight. To convert those voltages to mg/L after recovery, you need a single reference point recorded before launch.
 
 **Steps (do this at the launch site, after all sensors are connected and running):**
 
@@ -407,6 +425,8 @@ The dissolved oxygen sensor logs raw `voltage_mv` during flight. To convert thos
    - The temperature reading from the DS18B20 at that moment
    - The time of calibration
 5. This is the only number that cannot be recovered after the fact - do not skip it
+
+**Arduino mode:** the Atlas Surveyor Arduino library calibrates on-device. Instead of the above, send the `CAL` command over serial (see `arduino/Combinedsensors.ino`) with the probe in open air before launch. `tools/analyse_do.py` does not need a `--cal` value for Arduino-mode data.
 
 ---
 
@@ -443,26 +463,29 @@ FROM temperature;
 
 ### Step 3 - Convert D.O. voltage to mg/L
 
-Using your pre-flight calibration voltage and the concurrent temperature data:
+`tools/analyse_do.py` auto-detects whether the database has a `voltage_mv` column (direct/dummy mode — needs `--cal`) or a `do_percent` column (Arduino mode — already calibrated, `--cal` is ignored).
 
 ```bash
-# Minimal - prints summary and 5-row preview
-python3 tools/analyse_do.py   --db sensor_data.db   --cal <your_calibration_mV>
+# Direct / dummy mode - calibration required
+python3 tools/analyse_do.py --db sensor_data.db --cal <your_calibration_mV>
+
+# Arduino mode - no --cal needed (already calibrated on-device)
+python3 tools/analyse_do.py --db sensor_data.db
 
 # With altitude/pressure correction (recommended - accounts for stratospheric conditions)
-python3 tools/analyse_do.py   --db sensor_data.db   --cal <your_calibration_mV>   --pressure-csv altitude.csv
+python3 tools/analyse_do.py --db sensor_data.db --cal <your_calibration_mV> --pressure-csv altitude.csv
 
 # Save full results to CSV for reporting
-python3 tools/analyse_do.py   --db sensor_data.db   --cal <your_calibration_mV>   --out results/do_analysis.csv
+python3 tools/analyse_do.py --db sensor_data.db --cal <your_calibration_mV> --out results/do_analysis.csv
 ```
 
 **What the script calculates:**
 
 | Output column | Formula | Notes |
 |---|---|---|
-| `saturation_pct` | `(voltage_mv / cal_voltage) × 100` | Simple ratio against calibration reference |
-| `do_mg_L` | `saturation_pct × solubility_at_temp(temp_c)` | Uses Standard Methods (APHA 4500-O) solubility table, interpolated per temperature reading |
-| `do_mg_L_corrected` | `do_mg_L × (pressure_kpa / 101.325)` | Pressure correction - important for float altitude where ambient O₂ partial pressure is ~1–2% of sea level |
+| `saturation_pct` | `(voltage_mv / cal_voltage) × 100` (direct mode) **or** `do_percent` directly (Arduino mode) | Direct mode: simple ratio against calibration reference. Arduino mode: already computed on-device. |
+| `do_mg_L` | `saturation_pct × solubility_at_temp(temp_c)` | Uses Standard Methods (APHA 4500-O) solubility table, interpolated per temperature reading. Same for both modes. |
+| `do_mg_L_corrected` | `do_mg_L × (pressure_kpa / 101.325)` | Pressure correction - important for float altitude where ambient O₂ partial pressure is ~1–2% of sea level. |
 
 The pressure correction is what makes the stratosphere data scientifically meaningful - without it, the mg/L values during float would assume sea-level oxygen partial pressure, which is not the environment the cyanobacteria were experiencing.
 
@@ -478,11 +501,12 @@ All tunable values are in `src/config.py`. Key settings:
 | `ARDUINO_SERIAL_PORT` | `"/dev/ttyACM0"` | USB serial port for Arduino (only used in Arduino mode) |
 | `ARDUINO_BAUD_RATE` | `115200` | Must match `Serial.begin()` in the `.ino` sketch |
 | `SAMPLE_INTERVAL_S` | `1.0` | Seconds between readings (direct mode only — Arduino mode uses the sketch's `delay()`) |
-| `ADS1015_I2C_ADDRESS` | `0x48` | I2C address for the ADS1015 (current + D.O.) |
+| `ADS1015_I2C_ADDRESS` | `0x48` | I2C address for the ADS1015 (current + D.O., direct mode) |
 | `ADS1015_CHANNEL_CURRENT` | `0` | ADS1015 AIN0 for current sensor |
 | `ADS1015_CHANNEL_DO` | `2` | ADS1015 AIN2 for D.O. sensor |
 | `PAR_RS485_DE_PIN` | `22` | BCM GPIO for MAX485E DE/RE direction control |
 | `ACS723_SENSITIVITY_V_PER_A` | `0.400` | **Verify against exact ACS723 part number** |
+| `UVC_I2C_ADDRESS` | `0x4D` | I2C address for the UVC Click (direct mode; also used by the Arduino sketch) |
 | `TEMP_TARGET_C` | `22.5` | Target temperature (midpoint of 20–25°C range) |
 | `TEMP_WARNING_LOW_C` | `20.0` | Heater ON below this temperature |
 | `TEMP_WARNING_HIGH_C` | `25.0` | Heater OFF above this temperature |
@@ -499,12 +523,7 @@ All tunable values are in `src/config.py`. Key settings:
 - [ ] VCC SEL jumper on UVC Click set to correct voltage (left = 3.3V)
 - [ ] DS18B20 pull-up resistor (4.7kΩ) wired between DATA and 3.3V
 - [ ] ACS723 part number confirmed → correct sensitivity set in `config.py`
-- [ ] D.O. pre-flight calibration completed:
-  - Leave probe exposed to open air for 5+ minutes until `voltage_mv` stabilises
-  - Record the stable `voltage_mv` reading ← this is your `--cal` value for post-flight analysis
-  - Record the temperature (from DS18B20) at the moment of calibration
-  - Record the time of calibration
-  - Write all of this in your lab notebook - it cannot be recovered after the fact
+- [ ] D.O. pre-flight calibration completed (see mode-specific procedure above)
 - [ ] `./run.sh --dummy` runs clean with no errors
 - [ ] Systemd service enabled (`sudo systemctl enable msw-sensors`)
 - [ ] MOSFET heater wired: GPIO12 → gate, buck converter output → drain, heater → source
@@ -528,8 +547,9 @@ All tunable values are in `src/config.py`. Key settings:
 - [ ] Arduino connected to Pi via USB cable
 - [ ] `ls /dev/ttyACM*` shows the Arduino serial port
 - [ ] `ARDUINO_SERIAL_PORT` in `config.py` matches the port from the step above
-- [ ] All sensors wired to Arduino pins (not to the Pi — see pin assignments in the `.ino`)
-- [ ] `./run.sh --arduino` shows `READY` → `START` → sensor data in the log
+- [ ] All sensors wired to Arduino pins (not to the Pi — see pin assignments above and in the `.ino`)
+- [ ] `./run.sh --arduino` shows `READY` → `START` → sensor data in the log, including `UVC Voltage:` / `UVC Intensity:` lines
+- [ ] Arduino DO probe calibrated via the `CAL` serial command before flight
 
 ---
 
@@ -538,7 +558,8 @@ All tunable values are in `src/config.py`. Key settings:
 | Item | Status |
 |---|---|
 | PAR sensor MODBUS communication | Works in Arduino mode (SoftwareSerial RS-485). Direct Pi mode not yet fully verified — GPIO22 gets partial response, RO/DI wiring needs confirmation |
-| D.O. calibration to mg/L | Raw voltage (mV) is logged; conversion done post-flight using pre-flight calibration curve |
+| D.O. calibration | Direct/dummy mode: raw voltage (mV) is logged; conversion done post-flight using pre-flight calibration curve. Arduino mode: calibrated on-device via the Atlas Surveyor library. `tools/analyse_do.py` handles both. |
 | ADS1015 max sample rate | Run `tools/benchmark_adc.py` (update import to ads1015 first) when hardware arrives |
-| Per-sensor unit tests | Stubs written, implementation pending - see `tests/test_*.py` |
+| Per-sensor unit tests | Stubs written, implementation pending - see `tests/test_*.py` (updated to match current hardware) |
 | `benchmark_adc.py` | Needs ADS1115 → ADS1015 import update |
+| Surveyor vendor library files | `do_surveyor.*`/`do_iso_surveyor.*` are used by the DO sensor; ORP/pH/RTD Surveyor variants at the repo root are unused leftovers from the vendor library and are candidates for removal |

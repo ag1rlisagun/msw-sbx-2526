@@ -2,18 +2,35 @@
 analyse_do.py - Post-flight dissolved oxygen analysis.
 
 PURPOSE:
-    Converts raw voltage_mv readings from the dissolved_oxygen table into
-    % saturation and mg/L using:
-        - A pre-flight air calibration voltage (recorded in your lab notebook)
-        - Concurrent temperature readings from the temperature table
-        - Optional pressure correction for stratospheric altitude
+    Converts raw dissolved_oxygen readings into % saturation and mg/L.
 
-    The probe logs voltage_mv during flight. This script is run after
-    recovery to produce meaningful DO values.
+    IMPORTANT — TWO POSSIBLE SCHEMAS:
+        Direct mode / dummy mode log a raw "voltage_mv" column. This is an
+        uncalibrated ADS1015 ADC reading and requires a --cal argument
+        (the pre-flight air calibration voltage) to convert to % saturation.
+
+        Arduino mode logs a "do_percent" column instead. This comes from
+        the Atlas Scientific Surveyor Arduino library's
+        read_do_percentage(), which is already calibrated on-device via
+        its own EEPROM-stored calibration (see the "CAL" / "CAL,CLEAR"
+        serial commands in arduino/Combinedsensors.ino). No --cal value
+        is needed or used for this schema.
+
+    This script auto-detects which schema a given database has (by
+    checking the dissolved_oxygen table's columns) and processes it
+    accordingly. Do not assume a hardcoded "voltage_mv" column - it may
+    not exist, depending on which mode collected the data.
+
+    A pre-flight air calibration voltage (recorded in your lab notebook)
+    - Concurrent temperature readings from the temperature table
+    - Optional pressure correction for stratospheric altitude
 
 USAGE:
-    # Minimal - just calibration voltage required:
+    # Direct-mode / dummy-mode data (voltage_mv) - calibration required:
     python3 tools/analyse_do.py --db src/data/sensor_data.db --cal 440.0
+
+    # Arduino-mode data (do_percent) - already calibrated, no --cal needed:
+    python3 tools/analyse_do.py --db src/data/sensor_data.db
 
     # With pressure correction using estimated altitude data:
     python3 tools/analyse_do.py --db src/data/sensor_data.db --cal 440.0 --pressure-csv altitude.csv
@@ -21,7 +38,7 @@ USAGE:
     # Save output to CSV:
     python3 tools/analyse_do.py --db src/data/sensor_data.db --cal 440.0 --out results/do_analysis.csv
 
-PRE-FLIGHT CALIBRATION PROCEDURE:
+PRE-FLIGHT CALIBRATION PROCEDURE (direct/dummy mode only):
     Before launch, expose the probe to open air for 5+ minutes until the
     voltage reading stabilises. Record:
         1. The stable voltage_mv value  ← this is your --cal value
@@ -32,11 +49,18 @@ PRE-FLIGHT CALIBRATION PROCEDURE:
     Example: if the probe reads 438.2 mV in open air at 22°C before launch,
     run this script with --cal 438.2
 
+    Arduino mode does NOT need this procedure - calibrate the probe using
+    the "CAL" serial command (see Combinedsensors.ino) before flight instead,
+    and read_do_percentage() will already reflect that calibration.
+
 WHAT GETS CALCULATED:
-    % saturation:
+    % saturation (voltage_mv schema):
         saturation_pct = (voltage_mv / calibration_voltage_mv) * 100.0
 
-    mg/L (requires temperature):
+    % saturation (do_percent schema):
+        saturation_pct = do_percent   (already computed on-device)
+
+    mg/L (requires temperature, both schemas):
         do_mg_L = (saturation_pct / 100.0) * solubility_at_temp(temp_c)
 
         Solubility values come from the Standard Methods table (APHA 4500-O)
@@ -53,12 +77,12 @@ WHAT GETS CALCULATED:
 OUTPUT COLUMNS:
     timestamp           - Unix epoch (from database)
     datetime            - Human-readable UTC
-    voltage_mv          - Raw logged value
+    voltage_mv OR do_percent - Raw logged value (whichever schema applies)
     temperature_c       - From DS18B20 (matched by nearest timestamp)
-    saturation_pct      - % dissolved oxygen saturation
-    do_mg_L             - Dissolved oxygen in mg/L
-    do_mg_L_corrected   - Pressure-corrected mg/L (only if --pressure-csv provided)
-    temp_source         - "measured" or "interpolated" or "default_25C"
+    saturation_pct       - % dissolved oxygen saturation
+    do_mg_L              - Dissolved oxygen in mg/L
+    do_mg_L_corrected    - Pressure-corrected mg/L (only if --pressure-csv provided)
+    temp_source          - "measured" or "interpolated" or "default_25C"
 """
 
 import argparse
@@ -139,16 +163,46 @@ def solubility_at_temp(temp_c: float) -> float:
 # Database helpers
 # ---------------------------------------------------------------------------
 
-def load_do_readings(db_path: str) -> list[dict]:
-    """Load all rows from the dissolved_oxygen table."""
+def load_do_readings(db_path: str) -> tuple[list[dict], str]:
+    """
+    Load all rows from the dissolved_oxygen table.
+
+    Returns:
+        (rows, mode) where mode is:
+            "voltage" - table has a "voltage_mv" column (direct/dummy mode).
+                        Needs --cal to compute saturation_pct.
+            "percent" - table has a "do_percent" column (Arduino mode).
+                        Already calibrated on-device; --cal is ignored.
+    """
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     try:
-        rows = conn.execute(
-            "SELECT timestamp, avg_pulse_width_us, voltage_mv "
-            "FROM dissolved_oxygen ORDER BY timestamp ASC"
-        ).fetchall()
-        return [dict(r) for r in rows]
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(dissolved_oxygen)")]
+
+        if "voltage_mv" in cols:
+            mode = "voltage"
+            rows = conn.execute(
+                "SELECT timestamp, voltage_mv "
+                "FROM dissolved_oxygen ORDER BY timestamp ASC"
+            ).fetchall()
+        elif "do_percent" in cols:
+            mode = "percent"
+            rows = conn.execute(
+                "SELECT timestamp, do_percent "
+                "FROM dissolved_oxygen ORDER BY timestamp ASC"
+            ).fetchall()
+        else:
+            print(
+                f"ERROR: dissolved_oxygen table has neither 'voltage_mv' nor "
+                f"'do_percent' column. Found columns: {cols}"
+            )
+            print(
+                "This usually means the table is empty (no schema yet) or "
+                "was written by an unexpected sensor version."
+            )
+            sys.exit(1)
+
+        return [dict(r) for r in rows], mode
     except sqlite3.OperationalError as e:
         print(f"ERROR: Could not read dissolved_oxygen table: {e}")
         print("Has the sensor run and written data to this database?")
@@ -235,22 +289,35 @@ def match_pressure(do_ts: float, pressure_rows: list[dict]) -> float | None:
 
 def convert_row(
     do_row: dict,
-    cal_voltage_mv: float,
+    mode: str,
+    cal_voltage_mv: float | None,
     temp_rows: list[dict],
     pressure_rows: list[dict],
 ) -> dict:
-    """Convert a single DO row to all derived values."""
+    """
+    Convert a single DO row to all derived values.
+
+    Args:
+        do_row: one row from load_do_readings(), containing "timestamp" and
+                either "voltage_mv" or "do_percent" depending on mode.
+        mode: "voltage" or "percent" - see load_do_readings().
+        cal_voltage_mv: required (and used) only when mode == "voltage".
+    """
     ts = do_row["timestamp"]
-    voltage_mv = do_row["voltage_mv"]
     dt = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
-    # % saturation
-    if cal_voltage_mv > 0:
-        saturation_pct = (voltage_mv / cal_voltage_mv) * 100.0
-    else:
-        saturation_pct = 0.0
+    if mode == "voltage":
+        voltage_mv = do_row["voltage_mv"]
+        if cal_voltage_mv and cal_voltage_mv > 0:
+            saturation_pct = (voltage_mv / cal_voltage_mv) * 100.0
+        else:
+            saturation_pct = 0.0
+        raw_field = {"voltage_mv": round(voltage_mv, 3)}
+    else:  # mode == "percent" — already calibrated on-device (Arduino/Atlas library)
+        saturation_pct = do_row["do_percent"]
+        raw_field = {"do_percent": round(saturation_pct, 3)}
 
-    # mg/L using temperature
+    # mg/L using temperature (same for both schemas)
     temp_c, temp_source = match_temperature(ts, temp_rows)
     solubility = solubility_at_temp(temp_c)
     do_mg_L = (saturation_pct / 100.0) * solubility
@@ -265,7 +332,7 @@ def convert_row(
     return {
         "timestamp":          round(ts, 3),
         "datetime":           dt,
-        "voltage_mv":         round(voltage_mv, 3),
+        **raw_field,
         "temperature_c":      round(temp_c, 2),
         "temp_source":        temp_source,
         "saturation_pct":     round(saturation_pct, 2),
@@ -279,13 +346,12 @@ def convert_row(
 # Output
 # ---------------------------------------------------------------------------
 
-def print_summary(results: list[dict], has_pressure: bool) -> None:
+def print_summary(results: list[dict], mode: str, has_pressure: bool) -> None:
     """Print a human-readable summary to stdout."""
     if not results:
         print("No data to summarise.")
         return
 
-    voltages    = [r["voltage_mv"] for r in results]
     sats        = [r["saturation_pct"] for r in results]
     do_vals     = [r["do_mg_L"] for r in results]
     temps       = [r["temperature_c"] for r in results]
@@ -294,10 +360,15 @@ def print_summary(results: list[dict], has_pressure: bool) -> None:
     print("=" * 60)
     print("POST-FLIGHT DO ANALYSIS SUMMARY")
     print("=" * 60)
+    print(f"  Data schema:          {'voltage_mv (direct/dummy mode)' if mode == 'voltage' else 'do_percent (Arduino mode, pre-calibrated)'}")
     print(f"  Total readings:       {len(results)}")
     print(f"  Time range:           {results[0]['datetime']} → {results[-1]['datetime']}")
     print()
-    print(f"  Voltage (mV):         min {min(voltages):.1f}  max {max(voltages):.1f}  mean {sum(voltages)/len(voltages):.1f}")
+
+    if mode == "voltage":
+        voltages = [r["voltage_mv"] for r in results]
+        print(f"  Voltage (mV):         min {min(voltages):.1f}  max {max(voltages):.1f}  mean {sum(voltages)/len(voltages):.1f}")
+
     print(f"  Temperature (°C):     min {min(temps):.1f}  max {max(temps):.1f}  mean {sum(temps)/len(temps):.1f}")
     print(f"  DO saturation (%):    min {min(sats):.1f}  max {max(sats):.1f}  mean {sum(sats)/len(sats):.1f}")
     print(f"  DO (mg/L):            min {min(do_vals):.2f}  max {max(do_vals):.2f}  mean {sum(do_vals)/len(do_vals):.2f}")
@@ -335,9 +406,12 @@ def main():
     )
     parser.add_argument(
         "--cal",
-        required=True,
         type=float,
-        help="Pre-flight air calibration voltage in mV (recorded before launch)"
+        default=None,
+        help="Pre-flight air calibration voltage in mV. REQUIRED for "
+             "direct-mode/dummy-mode data (voltage_mv schema). IGNORED for "
+             "Arduino-mode data (do_percent schema), which is already "
+             "calibrated on-device via the Atlas Surveyor library."
     )
     parser.add_argument(
         "--pressure-csv",
@@ -356,21 +430,36 @@ def main():
         print(f"ERROR: Database not found: {args.db}")
         sys.exit(1)
 
-    if args.cal <= 0:
-        print("ERROR: Calibration voltage must be a positive number.")
-        sys.exit(1)
-
     print(f"Loading data from:       {args.db}")
-    print(f"Calibration voltage:     {args.cal} mV")
 
-    # Load data
-    do_rows      = load_do_readings(args.db)
-    temp_rows    = load_temperature_readings(args.db)
-    pressure_rows = load_pressure_data(args.pressure_csv) if args.pressure_csv else []
+    # Load data — this also tells us which schema (mode) the DB uses
+    do_rows, mode = load_do_readings(args.db)
 
     if not do_rows:
         print("No dissolved oxygen readings found in database.")
         sys.exit(0)
+
+    # --cal is required only for the voltage schema; ignored (with a note)
+    # for the percent schema, since that's already calibrated on-device.
+    if mode == "voltage":
+        if args.cal is None or args.cal <= 0:
+            print(
+                "ERROR: This database uses the voltage_mv schema (direct/dummy mode). "
+                "--cal (a positive number, in mV) is required to compute saturation_pct."
+            )
+            sys.exit(1)
+        print(f"Data schema:              voltage_mv (direct/dummy mode)")
+        print(f"Calibration voltage:      {args.cal} mV")
+    else:
+        if args.cal is not None:
+            print(
+                "NOTE: This database uses the do_percent schema (Arduino mode), "
+                "which is already calibrated on-device — ignoring --cal."
+            )
+        print(f"Data schema:              do_percent (Arduino mode, pre-calibrated)")
+
+    temp_rows    = load_temperature_readings(args.db)
+    pressure_rows = load_pressure_data(args.pressure_csv) if args.pressure_csv else []
 
     print(f"DO readings loaded:      {len(do_rows)}")
     print(f"Temperature readings:    {len(temp_rows)}")
@@ -379,12 +468,12 @@ def main():
 
     # Convert all rows
     results = [
-        convert_row(row, args.cal, temp_rows, pressure_rows)
+        convert_row(row, mode, args.cal, temp_rows, pressure_rows)
         for row in do_rows
     ]
 
     # Print summary
-    print_summary(results, has_pressure=bool(pressure_rows))
+    print_summary(results, mode, has_pressure=bool(pressure_rows))
 
     # Write CSV if requested
     if args.out:
@@ -394,9 +483,12 @@ def main():
         print("Preview (first 5 rows):")
         print("-" * 60)
         for r in results[:5]:
+            raw_display = (
+                f"{r['voltage_mv']} mV" if mode == "voltage" else f"{r['do_percent']}% (on-device)"
+            )
             print(
                 f"  {r['datetime']}  "
-                f"{r['voltage_mv']} mV  "
+                f"{raw_display}  "
                 f"{r['saturation_pct']}%  "
                 f"{r['do_mg_L']} mg/L  "
                 f"({r['temperature_c']}°C)"

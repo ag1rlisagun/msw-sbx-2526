@@ -7,6 +7,11 @@ Reading protocol (no library needed — raw I2C):
     3. voltage = (adc_val / 4096.0) * VCC
     4. intensity_mW_cm2 = voltage * calibration_factor
 
+NOTE: this same protocol is now also implemented on the Arduino side
+(readUVC() in arduino/Combinedsensors.ino) for Arduino mode, using the
+same output keys ("voltage_v", "intensity_mw_cm2") so the "uvc" table
+has an identical schema in both direct and Arduino modes.
+
 Prerequisites:
     pip install smbus2
     Enable I2C: sudo raspi-config → Interface Options → I2C

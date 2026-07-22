@@ -8,6 +8,13 @@ threads would in direct mode.
 
 Reconnection: if the serial connection drops (USB glitch, Arduino reset),
 the reader waits and retries automatically.
+
+NOTE: this class reads and aggregates six sensors' worth of data from a
+single serial stream — it is not itself a BaseSensor implementation (it
+doesn't have a single connect/start/read cycle per sensor). It's kept in
+sensors/real/ because it's a hardware-facing "real mode" data source, but
+conceptually it plays the role of main.py's per-sensor threads for the
+whole Arduino, not the role of an individual sensor driver.
 """
 
 import re
@@ -17,6 +24,11 @@ import threading
 
 log = logging.getLogger(__name__)
 
+# Maps a literal prefix printed by Combinedsensors.ino to (table, column).
+# IMPORTANT: this is a text match against the exact strings the .ino prints
+# via Serial.print(F("...")). If the wording in the sketch changes, the
+# corresponding entry here must be updated too, or that field will silently
+# stop being logged (no error is raised — the line just won't match).
 _PARSERS = {
     "Temp:":           ("temperature",      "temperature_c"),
     "PAR:":            ("par",              "par_umol_m2_s"),
@@ -26,6 +38,12 @@ _PARSERS = {
     "UV Index:":       ("uv",              "uv_index"),
     "UV Irradiance:":  ("uv",              "uv_irradiance_w_m2"),
     "Risk Level:":     ("uv",              "uv_risk_level"),
+    # UV-C (MikroE UVC Click / MCP3221) — added alongside readUVC() in
+    # Combinedsensors.ino. Column names match sensors/real/uvc_sensor.py
+    # and sensors/dummy/dummy_uvc_sensor.py so the "uvc" table has the
+    # same schema regardless of which mode wrote it.
+    "UVC Voltage:":    ("uvc",             "voltage_v"),
+    "UVC Intensity:":  ("uvc",             "intensity_mw_cm2"),
 }
 
 _RISK_LEVEL_MAP = {

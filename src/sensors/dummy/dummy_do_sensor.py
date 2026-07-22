@@ -13,6 +13,13 @@ PURPOSE:
     This dummy simulates a voltage near saturation (~1040mV), matching
     a healthy cyanobacteria culture.
 
+    NOTE ON MODES: this dummy (and the direct-mode real driver) reports a
+    raw "voltage_mv" value that is converted to % saturation / mg/L
+    post-flight using tools/analyse_do.py and a pre-flight calibration
+    voltage. Arduino mode instead logs "do_percent" directly from the
+    Atlas Surveyor library, which calibrates on-device. See
+    tools/analyse_do.py for how both are handled.
+
 HOW TO USE:
     USE_DUMMY_SENSORS=true python3 src/main.py
     or: ./run.sh --dummy

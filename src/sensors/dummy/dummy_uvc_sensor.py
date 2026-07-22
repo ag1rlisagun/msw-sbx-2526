@@ -13,6 +13,11 @@ PURPOSE:
     This dummy returns a stable low UV-C intensity value with small
     noise, representing background radiation during stratospheric flight.
 
+    NOTE: this same sensor is also now read in Arduino mode (see
+    arduino/Combinedsensors.ino and sensors/real/arduino_serial_reader.py),
+    which produces the same "voltage_v" / "intensity_mw_cm2" keys as this
+    dummy and the direct-mode driver, so all three stay interchangeable.
+
 HOW TO USE:
     USE_DUMMY_SENSORS=true python3 src/main.py
     or: ./run.sh --dummy
