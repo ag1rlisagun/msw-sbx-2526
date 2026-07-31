@@ -108,6 +108,22 @@ class ArduinoSerialReader:
         log.info(f"[arduino] Opening {self.port} at {self.baud} baud...")
         with pyserial.Serial(self.port, self.baud, timeout=2) as ser:
             time.sleep(2)
+
+            # Wait for the Arduino's READY, then send START
+            ser.reset_input_buffer()
+            deadline = time.time() + 30
+            while time.time() < deadline and not self._shutdown.is_set():
+                line = ser.readline().decode("utf-8", errors="replace").strip()
+                if line:
+                    log.info(f"[arduino] {line}")
+                if line == "READY":
+                    ser.write(b"START\n")
+                    ser.flush()
+                    log.info("[arduino] Sent START.")
+                    break
+            else:
+                raise RuntimeError("Timed out waiting for Arduino READY")
+
             log.info("[arduino] Connected. Listening for sensor data...")
 
             current_block: dict[str, dict[str, float]] = {}
