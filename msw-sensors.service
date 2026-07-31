@@ -5,9 +5,8 @@ After=multi-user.target
 
 [Service]
 User=msw2026
-WorkingDirectory=/home/pi/msw-sbx-2526
-# or ExecStart=/home/msw2026/msw-sbx-2526/run.sh --arduino
-ExecStart=/home/pi/msw-sbx-2526/run.sh --arduino
+WorkingDirectory=/home/msw2026/msw-sbx-2526
+ExecStart=/home/msw2026/msw-sbx-2526/run.sh --arduino
 Restart=always
 RestartSec=10
 # Give sensors time to initialize on first boot
