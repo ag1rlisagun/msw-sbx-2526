@@ -119,7 +119,7 @@ const float TEMP_VALID_MAX_C = 100.0;
 // =========================================================
 // ATLAS DO SENSOR
 // =========================================================
-// #define USE_PULSE_OUT
+#define USE_PULSE_OUT
 #ifdef USE_PULSE_OUT
   #include "do_iso_surveyor.h"
   Surveyor_DO_Isolated DO = Surveyor_DO_Isolated(A0);
