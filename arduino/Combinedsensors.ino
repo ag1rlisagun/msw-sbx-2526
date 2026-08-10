@@ -5,17 +5,10 @@
  * USB serial. The Pi parses this output in
  * src/sensors/real/arduino_serial_reader.py and logs it to SQLite.
  *
- * MERGED VERSION - combines:
- *   - UV-C read (readUVC)                    [from repo version]
- *   - Pi handshake (waitForStart)            [from repo version, now bounded]
- *   - Real DS18B20 temperature read          [from heater-branch version]
- *   - INA226 current sensor over I2C         [replaces ACS723 analog read]
- *
  * NOTE ON HEATER: this sketch does NOT control the heater. It reads and
- * reports only. Heater control is deliberately left out for now - decide
- * and document which side owns it (Arduino or Pi) before adding it back.
- * config.py currently has HEATER_CONTROLLER = "passive", so nothing is
- * driving the heater at present.
+ * reports only. The heater MOSFET gate is on the Pi (GPIO12), so heater
+ * control is Pi-side using the temperature streamed from here. See
+ * src/actuators/heater_controller.py and src/config.py.
  *
  * SENSORS:
  *   Temperature  DS18B20             1-Wire, digital pin 5
@@ -29,12 +22,22 @@
  * src/sensors/real/arduino_serial_reader.py. The Pi matches on these literal
  * strings. If the wording changes and _PARSERS is not updated, that field
  * silently stops being logged - no error is raised.
+ *
+ * CHANGES IN THIS REVISION:
+ *   1. readTemperature() now rejects exactly 0.0 as a sentinel. A missing
+ *      DS18B20 reads 0.00 with this library, which previously passed the
+ *      validity clamp and would have driven the Pi-side heater controller
+ *      to full duty on a phantom reading.
+ *   2. Added the AVR watchdog. If any read blocks for more than 8 seconds
+ *      the board resets itself rather than wedging for the rest of the
+ *      flight. Addresses TR5 (Software Failure).
  */
 
 #include <SoftwareSerial.h>
 #include "DFRobot_UVIndex240370Sensor.h"
 #include <Wire.h>
 #include <DS18B20.h>
+#include <avr/wdt.h>
 
 // =========================================================
 // PIN DEFINITIONS
@@ -43,26 +46,32 @@
 #define TEMP_SENSOR_PIN     5     // DS18B20 1-Wire
 
 // =========================================================
+// WATCHDOG
+// =========================================================
+// Nominal loop time is ~2.2 s with all sensors responding, ~3.3 s when
+// PAR is timing out. 8 s leaves comfortable margin while still catching a
+// genuine hang quickly.
+#define WATCHDOG_TIMEOUT    WDTO_8S
+
+// =========================================================
 // INA226 CURRENT SENSOR
 // =========================================================
 // !! VERIFY THESE AGAINST THE ACTUAL FLIGHT BOARD BEFORE TRUSTING READINGS !!
 //
-// INA226 I2C address is set by the A0/A1 pins. 0x40 = both tied to GND,
-// which is the default on most breakout boards. Confirm with a scanner
-// sketch or i2cdetect if readings look wrong.
+// INA226 I2C address is set by the A0/A1 pins. 0x40 = both tied to GND.
 #define INA226_ADDRESS      0x40
 
 // Shunt resistor value in ohms. Most INA226 breakouts ship with 0.1 ohm.
-// If your board has a different shunt (0.002, 0.01, etc.) change this or
-// every current reading will be off by a fixed scale factor.
+// A wrong value here scales EVERY current reading by a fixed factor while
+// looking entirely plausible - and current output is the primary science
+// measurement. Confirm against the board silkscreen before flight.
 const float INA226_SHUNT_OHMS = 0.1;
 
 // Current_LSB sets resolution. 10 uA/bit gives a full-scale range of
-// 10e-6 * 32768 = 0.327 A, which comfortably covers the ~20-25 mA the
-// microbial fuel cell produces plus baseline electronics draw.
+// 10e-6 * 32768 = 0.327 A, covering the ~20-25 mA from the fuel cell plus
+// baseline electronics draw.
 const float INA226_CURRENT_LSB = 0.00001;   // amps per bit
 
-// INA226 register map
 #define INA226_REG_CONFIG        0x00
 #define INA226_REG_SHUNTVOLTAGE  0x01
 #define INA226_REG_BUSVOLTAGE    0x02
@@ -78,9 +87,8 @@ SoftwareSerial PARsensor(2, 3);
 uint8_t Com[8] = { 0x01, 0x03, 0x00, 0x00, 0x00, 0x01, 0x84, 0x0A };
 int PAR = -1;
 
-// Bounded retries. The old version looped forever on no response, which
-// would hang the entire sketch - and therefore all six sensors - if the
-// PAR sensor glitched mid-flight.
+// Bounded retries. An unbounded loop here would hang the entire sketch -
+// and therefore all six sensors - if the PAR sensor glitched mid-flight.
 const int PAR_MAX_ATTEMPTS = 3;
 
 // =========================================================
@@ -100,8 +108,6 @@ struct UVData {
 // =========================================================
 // UV-C SENSOR (MikroE UVC Click / MCP3221)
 // =========================================================
-// Shares the Wire bus with the SEN0636 (0x23) and INA226 (0x40).
-// No address collisions between the three.
 #define UVC_I2C_ADDRESS        0x4D
 const float UVC_VCC                = 3.3;
 const float UVC_CALIBRATION_FACTOR = 2.9;
@@ -111,8 +117,10 @@ const float UVC_CALIBRATION_FACTOR = 2.9;
 // =========================================================
 DS18B20 tempSensor(TEMP_SENSOR_PIN);
 
-// A disconnected DS18B20 typically reads about -127 C. Anything outside
-// this window is treated as "no sensor" and reported as the -1.0 sentinel.
+// A disconnected DS18B20 reads exactly 0.00 with this library (other
+// libraries return ~-127). Neither is a plausible bioreactor temperature.
+// Both map to the -1.0 sentinel so the Pi-side heater controller can
+// recognise "no data" rather than acting on a phantom reading.
 const float TEMP_VALID_MIN_C = -50.0;
 const float TEMP_VALID_MAX_C = 100.0;
 
@@ -135,10 +143,8 @@ char user_data[bufferlen];
 // =========================================================
 // HANDSHAKE
 // =========================================================
-// Wait this long for the Pi to send START before giving up and streaming
-// anyway. A bounded wait means the sketch still works if the Pi-side
-// handshake is not implemented, or if the Arduino is being tested with a
-// plain serial monitor.
+// Bounded wait, so the sketch still works with a plain serial monitor or
+// if the Pi-side handshake is unavailable.
 const unsigned long START_TIMEOUT_MS = 15000;
 
 // =========================================================
@@ -167,6 +173,11 @@ bool ina226ReadRegister(uint8_t reg, uint16_t &value);
 // SETUP
 // =========================================================
 void setup() {
+  // Disable the watchdog first thing. If the board reset via watchdog, the
+  // timer is still armed and running at its shortest interval - leaving it
+  // armed through a slow init would cause a reset loop.
+  wdt_disable();
+
   Serial.begin(115200);
   Wire.begin();
   pinMode(DE_RE_PIN, OUTPUT);
@@ -182,6 +193,9 @@ void setup() {
 
   waitForStart();
 
+  // Arm the watchdog only after all init and the handshake are done.
+  wdt_enable(WATCHDOG_TIMEOUT);
+
   Serial.println(F("---"));
 }
 
@@ -189,6 +203,8 @@ void setup() {
 // LOOP
 // =========================================================
 void loop() {
+  wdt_reset();
+
   handleDOCommands();
 
   float temperature = readTemperature();
@@ -236,9 +252,6 @@ void waitForStart() {
 // =========================================================
 // INIT FUNCTIONS
 // =========================================================
-
-// Bounded retry. The old version looped forever, so a missing or
-// misbehaving SEN0636 prevented every other sensor from ever starting.
 void initUVSensor() {
   for (int i = 0; i < UV_INIT_MAX_ATTEMPTS; i++) {
     if (UVIndex240370Sensor.begin() == true) {
@@ -253,7 +266,6 @@ void initUVSensor() {
 }
 
 void initINA226() {
-  // Configuration register:
   //   [11:9]  010  AVG    = 16 samples
   //   [8:6]   100  VBUSCT = 1.1 ms
   //   [5:3]   100  VSHCT  = 1.1 ms
@@ -266,7 +278,6 @@ void initINA226() {
   ina226WriteRegister(INA226_REG_CONFIG, config);
   ina226WriteRegister(INA226_REG_CALIBRATION, cal);
 
-  // Verify the device is actually there by reading back the config register
   uint16_t readback = 0;
   if (ina226ReadRegister(INA226_REG_CONFIG, readback) && readback == config) {
     ina226OK = true;
@@ -301,10 +312,14 @@ float readTemperature() {
   tempSensor.doConversion();
   float t = tempSensor.getTempC();
 
-  // A disconnected DS18B20 reads about -127. Clamp anything implausible
-  // to the -1.0 sentinel so the Pi logs a recognisable "no data" value
-  // instead of a number that looks like a real temperature.
-  if (t < TEMP_VALID_MIN_C || t > TEMP_VALID_MAX_C) return -1.0;
+  // Exactly 0.0 means no sensor on the bus with this library. Treating it
+  // as a real reading previously caused the Pi-side heater controller to
+  // log a continuous LOW warning - and would have driven the heater to
+  // 100% duty once MOSFET control is enabled.
+  //
+  // Tradeoff: a genuine 0.00 C reading is now indistinguishable from "no
+  // sensor". Acceptable for a 20-25 C bioreactor.
+  if (t == 0.0 || t < TEMP_VALID_MIN_C || t > TEMP_VALID_MAX_C) return -1.0;
   return t;
 }
 
@@ -314,8 +329,7 @@ float readCurrent() {
   uint16_t raw = 0;
   if (!ina226ReadRegister(INA226_REG_CURRENT, raw)) return -1.0;
 
-  // Current register is signed two's complement
-  int16_t signedRaw = (int16_t)raw;
+  int16_t signedRaw = (int16_t)raw;   // two's complement
   return signedRaw * INA226_CURRENT_LSB;
 }
 
@@ -341,8 +355,6 @@ UVData readUV() {
   return uvReading;
 }
 
-// UV-C via MCP3221 12-bit ADC. Same protocol as
-// src/sensors/real/uvc_sensor.py so both modes produce the same schema.
 void readUVC(float &voltage, float &intensity) {
   Wire.requestFrom(UVC_I2C_ADDRESS, 2);
   if (Wire.available() == 2) {
@@ -357,8 +369,6 @@ void readUVC(float &voltage, float &intensity) {
   }
 }
 
-// Bounded MODBUS read. Sets PAR to -1 if no valid frame arrives, rather
-// than blocking the whole sketch until one does.
 void readPAR() {
   PARsensor.listen();
   uint8_t Data[10] = { 0 };

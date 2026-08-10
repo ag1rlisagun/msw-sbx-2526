@@ -14,23 +14,29 @@ UPDATED 2026-05-14 based on FRR presentation schematics:
     - Temperature sensor: unchanged (1-Wire)
 
 UPDATED (Arduino/Pi integration pass):
-    - Combinedsensors.ino now reads UV-C (MCP3221) in addition to the
-      other five sensors, so Arduino mode covers all six sensors again.
-    - tools/analyse_do.py now handles both DO schemas (voltage_mv from
-      direct mode / dummy, do_percent from Arduino mode) instead of
-      assuming voltage_mv unconditionally.
+    - Combinedsensors.ino reads all six sensors and streams over USB serial.
+    - Current sensor on the Arduino is an INA226 (I2C), not an ACS723.
+    - tools/analyse_do.py handles both DO schemas (voltage_mv from direct
+      mode / dummy, do_percent from Arduino mode).
+
+UPDATED (heater enablement pass):
+    - Heater control is Pi-side on GPIO12, acting on the temperature the
+      Arduino streams. There is no Arduino-side heater code.
+    - Sentinel handling added to both heater controllers - see
+      src/actuators/heater_controller.py.
 """
 
 # ---------------------------------------------------------------------------
 # Sensor mode: "direct" (Pi reads hardware) or "arduino" (Arduino over USB)
 # ---------------------------------------------------------------------------
-# "direct"  — original mode. Each sensor has its own Python driver and thread.
-# "arduino" — Arduino runs Combinedsensors.ino and streams readings over USB
+# "direct"  - original mode. Each sensor has its own Python driver and thread.
+# "arduino" - Arduino runs Combinedsensors.ino and streams readings over USB
 #             serial. The Pi parses the serial output and logs to SQLite.
-#             Use this when the Arduino can reach sensors the Pi cannot (e.g.
-#             SoftwareSerial RS-485 for the PAR sensor).
+#
+# Note run.sh --arduino sets SENSOR_MODE=arduino in the environment, which
+# overrides this value. The systemd unit passes --arduino.
 
-SENSOR_MODE = "direct"
+SENSOR_MODE = "arduino"
 
 # ---------------------------------------------------------------------------
 # Arduino serial settings (only used when SENSOR_MODE = "arduino")
@@ -55,69 +61,51 @@ MAX_CONSECUTIVE_FAILURES = 5
 FAILURE_BACKOFF_S = 5.0
 
 # ---------------------------------------------------------------------------
-# ADS1015 (12-bit ADC, shared by current sensor and D.O. sensor)
+# ADS1015 (direct mode only - Arduino mode does not use this)
 # ---------------------------------------------------------------------------
-# FRR schematics show ADS1015 (not ADS1115).
-# I2C address default is 0x48. Check with: sudo i2cdetect -y 1
 
 ADS1015_I2C_ADDRESS = 0x48
-
-# ADS1015 channel assignments
-ADS1015_CHANNEL_CURRENT = 0   # AIN0 - ACS723 output
+ADS1015_CHANNEL_CURRENT = 0   # AIN0 - current sensor output
 ADS1015_CHANNEL_DO = 2        # AIN2 - Surveyor Isolator analog output
 
 # ---------------------------------------------------------------------------
-# Current sensor - Allegro ACS723 via ADS1015
+# Current sensor (direct mode only)
 # ---------------------------------------------------------------------------
-# FRR schematic Figure 6: ACS723LLCTR-05AB-T → ADS1015 AIN0
+# In Arduino mode the current sensor is an INA226 read over I2C by the
+# sketch. Its shunt value and address live in Combinedsensors.ino, not here.
+#
+# !! OPEN ITEM: the INA226 shunt resistor value is unverified. A wrong value
+#    scales every current reading by a fixed factor while looking plausible,
+#    and current output is the primary science measurement.
 
 ACS723_SENSITIVITY_V_PER_A = 0.400
-
 ACS723_VCC = 5.0
-
 CURRENT_SAMPLE_COUNT = 10
 
 # ---------------------------------------------------------------------------
-# Dissolved Oxygen sensor - Atlas Scientific Mini D.O. + Surveyor Isolator
-#                           via ADS1015 (REPLACES PWM/pigpio)
+# Dissolved Oxygen sensor
 # ---------------------------------------------------------------------------
-# FRR schematic Figure 10: Surveyor analog output → ADS1015 AIN2
-# via R7 (1kΩ) + C5 (1µF) low-pass filter.
-#
-# pigpiod is NO LONGER required for D.O.
-#
-# NOTE: direct mode logs "voltage_mv" (raw, needs post-flight calibration).
+# Direct mode logs "voltage_mv" (raw, needs post-flight calibration).
 # Arduino mode logs "do_percent" (Atlas Surveyor library, calibrated
-# on-device). tools/analyse_do.py handles both.
+# on-device via the CAL serial command). tools/analyse_do.py handles both.
 
 DO_SAMPLE_COUNT = 10
 
 # ---------------------------------------------------------------------------
-# PAR sensor - SenseCAP S-PAR-02 via RS-485 MODBUS RTU + MAX485E
+# PAR sensor (direct mode only)
 # ---------------------------------------------------------------------------
-# FRR schematic Figure 8:
-#   PAR sensor RS-485 A/B → MAX485E A/B
-#   MAX485E RO  → GPIO15 / UART RXD (physical pin 10)
-#   MAX485E DI  → GPIO14 / UART TXD (physical pin 8)
-#   MAX485E RE + DE → GPIO22 (confirmed by GPIO scan test)
-#
-# IMPORTANT: The Pi serial console must be DISABLED for UART to work.
-#   sudo raspi-config → Interface Options → Serial Port
-#   → Login shell over serial: NO → Serial port hardware enabled: YES
+# In Arduino mode the PAR sensor is read via SoftwareSerial on the Arduino.
 
 PAR_SERIAL_PORT = "/dev/serial0"
 PAR_SLAVE_ADDRESS = 0x01
 PAR_BAUDRATE = 9600
-PAR_RS485_DE_PIN = 22          # GPIO22 — confirmed by GPIO scan
+PAR_RS485_DE_PIN = 22
 PAR_MAX_UMOL = 2500.0
 PAR_SAMPLE_COUNT = 3
 
 # ---------------------------------------------------------------------------
-# UV-C sensor - MikroE UVC Click (GUVC-T21GH via MCP3221 ADC)
+# UV-C sensor (direct mode only)
 # ---------------------------------------------------------------------------
-# NO CHANGE from original design in direct mode. Now also read in Arduino
-# mode (readUVC() in Combinedsensors.ino) over the same I2C bus as the UV
-# Index sensor — no extra Arduino pins required.
 
 UVC_I2C_ADDRESS = 0x4D
 UVC_VCC = 3.3
@@ -125,58 +113,80 @@ UVC_CALIBRATION_FACTOR = 2.9
 UVC_SAMPLE_COUNT = 10
 
 # ---------------------------------------------------------------------------
-# UV sensor - DFRobot SEN0636 Gravity UV Index Sensor (240–370nm)
+# UV sensor (direct mode only)
 # ---------------------------------------------------------------------------
-# NO CHANGE from original design. FRR data acquisition table confirms
-# direct I2C @ 0x23. The Arduino code also uses direct I2C.
-# IMPORTANT: Set the physical switch on the board to I2C before wiring.
 
 UVB_I2C_ADDRESS = 0x23
 UVB_SAMPLE_COUNT = 5
 
 # ---------------------------------------------------------------------------
-# Temperature sensor - DFRobot Waterproof DS18B20 (1-Wire)
+# Temperature sensor (direct mode only)
 # ---------------------------------------------------------------------------
-# NO CHANGE from original design.
 
 TEMPERATURE_SENSOR_ID = None
 
 # ---------------------------------------------------------------------------
-# Heater controller - MOSFET + PWM (REPLACES SSR)
+# Heater controller - MOSFET + PWM, Pi-side
 # ---------------------------------------------------------------------------
-# FRR schematic Figure 5:
-#   Pi GPIO12/PWM0 → MOSFET gate (via gate resistor)
-#   28V CSA supply → Buck converter (LM2576HVS) → ~20-24V regulated
-#   Buck output → MOSFET drain → Cartridge heater (immersible) → GND
-#   Mechanical thermostat in series → hardware safety cutoff at 25°C
+# WIRING (FRR schematic, Figure 5):
+#   Pi GPIO12/PWM0 (physical pin 32) -> MOSFET gate (via gate resistor)
+#   Pi GND (physical pin 6)          -> heater circuit ground
+#   28V CSA supply -> buck converter (LM2576HVS) -> ~20-24V regulated
+#   Buck output -> MOSFET drain -> cartridge heater (immersible) -> GND
+#   Mechanical thermostat in series -> hardware safety cutoff at 25 C
 #
-# FRR presentation explicitly states:
-#   Heater ON when temperature < 20°C
-#   Heater OFF when temperature > 25°C
-#   Target ~10W power, regulated via PWM duty cycle
+# FRR presentation states:
+#   Heater ON when temperature < 20 C
+#   Heater OFF when temperature > 25 C
+#   Target ~10 W, regulated via PWM duty cycle
+#
+# ---------------------------------------------------------------------------
+# BEFORE SETTING THIS TO "mosfet" - complete all four steps in order:
+#
+#   1. Confirm a pulldown resistor (10k typical) exists from GPIO12 to
+#      ground. Without it the MOSFET gate floats whenever the Pi is off or
+#      mid-boot, and can drift to a partially-on state.
+#
+#   2. Flash the revised Combinedsensors.ino, which maps a missing DS18B20
+#      to the -1.0 sentinel instead of reporting 0.00 C.
+#
+#   3. With the HEATER LOAD DISCONNECTED, set this to "mosfet" and verify
+#      with a multimeter that GPIO12 goes high when the DS18B20 is cooled
+#      below 20 C and low when warmed above 25 C.
+#
+#   4. Only after that switching is confirmed, connect the heater load.
+#
+# Leave this as "passive" until all four are done. Passive mode logs
+# temperature warnings and sends no commands to any hardware.
+# ---------------------------------------------------------------------------
 
-HEATER_CONTROLLER = "passive"   # change to "mosfet" once wiring is confirmed
+HEATER_CONTROLLER = "passive"   # change to "mosfet" after the steps above
 
-# Temperature thresholds (updated per FRR)
-TEMP_TARGET_C = 22.5            # midpoint of 20-25°C operating range
+# Temperature thresholds (per FRR)
+TEMP_TARGET_C = 22.5            # midpoint of the 20-25 C operating range
 TEMP_WARNING_LOW_C = 20.0
 TEMP_WARNING_HIGH_C = 25.0
 
 # MOSFET controller settings
 HEATER_PWM_PIN = 12             # GPIO12/PWM0 from FRR schematic
-HEATER_PWM_FREQ_HZ = 1000      # 1 kHz switching frequency
-HEATER_HYSTERESIS_C = 2.5      # ON below 20°C (22.5-2.5), OFF above 25°C (22.5+2.5)
+HEATER_PWM_FREQ_HZ = 1000       # 1 kHz switching frequency
+HEATER_HYSTERESIS_C = 2.5       # ON below 20 C (22.5-2.5), OFF above 25 C (22.5+2.5)
 
 # ---------------------------------------------------------------------------
 # GPIO pin assignments summary
 # ---------------------------------------------------------------------------
-# GPIO2  - I2C SDA (reserved, shared bus)
-# GPIO3  - I2C SCL (reserved, shared bus)
-# GPIO4  - DS18B20 1-Wire
-# GPIO12 - Heater MOSFET PWM (PWM0)
-# GPIO14 - UART TXD (PAR sensor MAX485E DI)
-# GPIO15 - UART RXD (PAR sensor MAX485E RO)
-# GPIO22 - PAR sensor MAX485E DE/RE
+# Arduino mode - the Pi uses only these:
+#   GPIO12 - Heater MOSFET PWM (PWM0), physical pin 32
+#   GND    - heater circuit ground, physical pin 6
+#   USB    - serial link to the Arduino
+#
+# Direct mode additionally uses:
+#   GPIO2  - I2C SDA (shared bus)
+#   GPIO3  - I2C SCL (shared bus)
+#   GPIO4  - DS18B20 1-Wire
+#   GPIO14 - UART TXD (PAR sensor MAX485E DI)
+#   GPIO15 - UART RXD (PAR sensor MAX485E RO)
+#   GPIO22 - PAR sensor MAX485E DE/RE
 
 # ---------------------------------------------------------------------------
 # Dummy mode
