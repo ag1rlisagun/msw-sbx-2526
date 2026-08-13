@@ -23,14 +23,35 @@
  * strings. If the wording changes and _PARSERS is not updated, that field
  * silently stops being logged - no error is raised.
  *
- * CHANGES IN THIS REVISION:
- *   1. readTemperature() now rejects exactly 0.0 as a sentinel. A missing
- *      DS18B20 reads 0.00 with this library, which previously passed the
- *      validity clamp and would have driven the Pi-side heater controller
- *      to full duty on a phantom reading.
- *   2. Added the AVR watchdog. If any read blocks for more than 8 seconds
- *      the board resets itself rather than wedging for the rest of the
- *      flight. Addresses TR5 (Software Failure).
+ * ---------------------------------------------------------------------------
+ * CHANGES IN THIS REVISION - ported from Sensors.ino (teammate's branch)
+ * ---------------------------------------------------------------------------
+ *   1. INA226 now reads the SHUNT VOLTAGE register (0x01) and computes
+ *      current in software, instead of programming the calibration register
+ *      and reading the current register (0x04). More robust - no calibration
+ *      write to go wrong - and the shunt value lives in plain arithmetic
+ *      where it is easy to correct. Also yields bus voltage and power.
+ *   2. ina226ReadRegister() now reports success via a bool& out-parameter.
+ *      Previously it returned 0 on failure, which is indistinguishable from
+ *      a genuine 0 A / 0 V reading.
+ *   3. handleDOCommands() null-terminates the buffer. readBytesUntil() does
+ *      not do this itself, so a full buffer previously let parse_cmd() read
+ *      past the end of the array.
+ *   4. parse_cmd() uses String::toUpperCase() instead of strupr(). strupr is
+ *      an MSVC extension and is not available on all avr-gcc toolchains.
+ *   5. riskLevelStr() returns const __FlashStringHelper* instead of String,
+ *      keeping the labels in flash and avoiding heap allocation in a loop
+ *      that runs for the entire flight.
+ *
+ * NOT taken from Sensors.ino, deliberately:
+ *   - Its unbounded `while (UVIndex240370Sensor.begin() != true)` init loop.
+ *     That is the hang that cost nine days of silent downtime.
+ *   - Its removal of waitForStart(). The Pi-side reader waits for READY and
+ *     will loop on reconnect forever without it.
+ *   - Its removal of the UV-C sensor.
+ *   - Its `Serial.print(temperature, 0)`, which rounds to whole degrees.
+ *   - Its non-ASCII degree and superscript characters in print strings.
+ * ---------------------------------------------------------------------------
  */
 
 #include <SoftwareSerial.h>
@@ -56,27 +77,24 @@
 // =========================================================
 // INA226 CURRENT SENSOR
 // =========================================================
-// !! VERIFY THESE AGAINST THE ACTUAL FLIGHT BOARD BEFORE TRUSTING READINGS !!
-//
 // INA226 I2C address is set by the A0/A1 pins. 0x40 = both tied to GND.
 #define INA226_ADDRESS      0x40
 
-// Shunt resistor value in ohms. Most INA226 breakouts ship with 0.1 ohm.
-// A wrong value here scales EVERY current reading by a fixed factor while
-// looking entirely plausible - and current output is the primary science
-// measurement. Confirm against the board silkscreen before flight.
-const float INA226_SHUNT_OHMS = 0.1;
-
-// Current_LSB sets resolution. 10 uA/bit gives a full-scale range of
-// 10e-6 * 32768 = 0.327 A, covering the ~20-25 mA from the fuel cell plus
-// baseline electronics draw.
-const float INA226_CURRENT_LSB = 0.00001;   // amps per bit
-
+// Register map
 #define INA226_REG_CONFIG        0x00
 #define INA226_REG_SHUNTVOLTAGE  0x01
 #define INA226_REG_BUSVOLTAGE    0x02
-#define INA226_REG_CURRENT       0x04
-#define INA226_REG_CALIBRATION   0x05
+
+// !! OPEN ITEM: VERIFY THIS AGAINST THE ACTUAL FLIGHT BOARD !!
+// A wrong shunt value scales EVERY current reading by a fixed factor while
+// looking entirely plausible - and current output is the primary science
+// measurement. Read it off the board silkscreen or ask the electrical lead.
+const float INA226_SHUNT_OHMS = 0.1f;
+
+// Datasheet fixed scaling. These are properties of the chip, not the board,
+// and should not need changing.
+const float INA226_SHUNT_LSB_V = 2.5e-6f;    // 2.5 uV per LSB
+const float INA226_BUS_LSB_V   = 0.00125f;   // 1.25 mV per LSB
 
 bool ina226OK = false;
 
@@ -89,6 +107,9 @@ int PAR = -1;
 
 // Bounded retries. An unbounded loop here would hang the entire sketch -
 // and therefore all six sensors - if the PAR sensor glitched mid-flight.
+// Kept at 3 rather than the 10 in Sensors.ino: each attempt costs ~200 ms
+// plus up to 4 x 500 ms of readN() timeouts, so 10 could push a single
+// failed read past the 8 s watchdog window.
 const int PAR_MAX_ATTEMPTS = 3;
 
 // =========================================================
@@ -108,6 +129,8 @@ struct UVData {
 // =========================================================
 // UV-C SENSOR (MikroE UVC Click / MCP3221)
 // =========================================================
+// !! OPEN ITEM: measured 4.5 V at this board's VCC while the sketch assumes
+//    3.3 V. Check the VCC SEL jumper before trusting any UV-C reading.
 #define UVC_I2C_ADDRESS        0x4D
 const float UVC_VCC                = 3.3;
 const float UVC_CALIBRATION_FACTOR = 2.9;
@@ -127,7 +150,7 @@ const float TEMP_VALID_MAX_C = 100.0;
 // =========================================================
 // ATLAS DO SENSOR
 // =========================================================
-#define USE_PULSE_OUT
+// #define USE_PULSE_OUT
 #ifdef USE_PULSE_OUT
   #include "do_iso_surveyor.h"
   Surveyor_DO_Isolated DO = Surveyor_DO_Isolated(A0);
@@ -157,31 +180,29 @@ void initINA226();
 void waitForStart();
 float readTemperature();
 float readCurrent();
+float readBusVoltage();
 float readDO();
 UVData readUV();
 void readUVC(float &voltage, float &intensity);
 void readPAR();
 void handleDOCommands();
 void parse_cmd(char* string);
-String riskLevelStr(uint16_t level);
+const __FlashStringHelper* riskLevelStr(uint16_t level);
 uint8_t readN(uint8_t *buf, size_t len);
 unsigned int CRC16_2(unsigned char *buf, int len);
-void ina226WriteRegister(uint8_t reg, uint16_t value);
-bool ina226ReadRegister(uint8_t reg, uint16_t &value);
+int16_t ina226ReadRegister(uint8_t reg, bool &ok);
 
 // =========================================================
 // SETUP
 // =========================================================
 void setup() {
   // Disable the watchdog first thing. If the board reset via watchdog, the
-  // timer is still armed and running at its shortest interval - leaving it
-  // armed through a slow init would cause a reset loop.
+  // timer is still armed at its shortest interval - leaving it armed through
+  // a slow init would cause a reset loop.
   wdt_disable();
 
   Serial.begin(115200);
   Wire.begin();
-  pinMode(DE_RE_PIN, OUTPUT);
-  digitalWrite(DE_RE_PIN, LOW);
 
   initUVSensor();
   initINA226();
@@ -208,16 +229,25 @@ void loop() {
   handleDOCommands();
 
   float temperature = readTemperature();
-  float current     = readCurrent();
-  float do_value    = readDO();
+
+  // Read current and bus voltage once each, then derive power from the values
+  // already in hand. Calling a separate readPower() that re-read both would
+  // double the I2C traffic and sample the two quantities at different moments.
+  float current    = readCurrent();
+  float busVoltage = readBusVoltage();
+  float power      = current * busVoltage;
+
+  float do_value   = readDO();
   readPAR();
-  UVData uvReading  = readUV();
+  UVData uvReading = readUV();
   float uvcVoltage, uvcIntensity;
   readUVC(uvcVoltage, uvcIntensity);
 
   Serial.print(F("Temp: "));          Serial.print(temperature, 2);    Serial.println(F(" C"));
   Serial.print(F("PAR: "));           Serial.print(PAR);                Serial.println(F(" umol/m2/s"));
   Serial.print(F("Current: "));       Serial.print(current, 5);         Serial.println(F(" A"));
+  Serial.print(F("Bus Voltage: "));   Serial.print(busVoltage, 5);      Serial.println(F(" V"));
+  Serial.print(F("Power: "));         Serial.print(power, 5);           Serial.println(F(" W"));
   Serial.print(F("DO: "));            Serial.print(do_value, 2);        Serial.println(F(" %"));
   Serial.print(F("UV Voltage: "));    Serial.print(uvReading.voltage);  Serial.println(F(" mV"));
   Serial.print(F("UV Index: "));      Serial.println(uvReading.index);
@@ -266,20 +296,12 @@ void initUVSensor() {
 }
 
 void initINA226() {
-  //   [11:9]  010  AVG    = 16 samples
-  //   [8:6]   100  VBUSCT = 1.1 ms
-  //   [5:3]   100  VSHCT  = 1.1 ms
-  //   [2:0]   111  MODE   = shunt + bus, continuous
-  const uint16_t config = 0x4527;
-
-  // CAL = 0.00512 / (Current_LSB * R_shunt)
-  uint16_t cal = (uint16_t)(0.00512 / (INA226_CURRENT_LSB * INA226_SHUNT_OHMS));
-
-  ina226WriteRegister(INA226_REG_CONFIG, config);
-  ina226WriteRegister(INA226_REG_CALIBRATION, cal);
-
-  uint16_t readback = 0;
-  if (ina226ReadRegister(INA226_REG_CONFIG, readback) && readback == config) {
+  // Presence check only. This revision reads the shunt voltage register
+  // directly and scales it in software, so there is no calibration register
+  // to program and nothing to configure at startup - the chip's default
+  // continuous shunt-and-bus conversion mode is what we want.
+  Wire.beginTransmission(INA226_ADDRESS);
+  if (Wire.endTransmission() == 0) {
     ina226OK = true;
     Serial.println(F("INA226 initialized."));
   } else {
@@ -300,6 +322,11 @@ void initDOSensor() {
 }
 
 void initPARSensor() {
+  // DE/RE pin setup lives here rather than in setup() so that everything
+  // related to the PAR sensor is in one place.
+  pinMode(DE_RE_PIN, OUTPUT);
+  digitalWrite(DE_RE_PIN, LOW);
+
   PARsensor.begin(9600);
   PARsensor.listen();
   Serial.println(F("PAR Sensor initialized."));
@@ -313,9 +340,9 @@ float readTemperature() {
   float t = tempSensor.getTempC();
 
   // Exactly 0.0 means no sensor on the bus with this library. Treating it
-  // as a real reading previously caused the Pi-side heater controller to
-  // log a continuous LOW warning - and would have driven the heater to
-  // 100% duty once MOSFET control is enabled.
+  // as a real reading previously caused the Pi-side heater controller to log
+  // a continuous LOW warning - and would drive the heater to 100% duty once
+  // MOSFET control is enabled.
   //
   // Tradeoff: a genuine 0.00 C reading is now indistinguishable from "no
   // sensor". Acceptable for a 20-25 C bioreactor.
@@ -323,14 +350,28 @@ float readTemperature() {
   return t;
 }
 
+// Current from the shunt voltage register, scaled in software.
+// I = V_shunt / R_shunt, where V_shunt = raw * 2.5 uV.
 float readCurrent() {
   if (!ina226OK) return -1.0;
 
-  uint16_t raw = 0;
-  if (!ina226ReadRegister(INA226_REG_CURRENT, raw)) return -1.0;
+  bool ok = false;
+  int16_t rawShunt = ina226ReadRegister(INA226_REG_SHUNTVOLTAGE, ok);
+  if (!ok) return -1.0;
 
-  int16_t signedRaw = (int16_t)raw;   // two's complement
-  return signedRaw * INA226_CURRENT_LSB;
+  float shuntVoltage = rawShunt * INA226_SHUNT_LSB_V;
+  return shuntVoltage / INA226_SHUNT_OHMS;
+}
+
+// Bus voltage register is unsigned, 1.25 mV per LSB.
+float readBusVoltage() {
+  if (!ina226OK) return -1.0;
+
+  bool ok = false;
+  uint16_t rawBus = (uint16_t)ina226ReadRegister(INA226_REG_BUSVOLTAGE, ok);
+  if (!ok) return -1.0;
+
+  return rawBus * INA226_BUS_LSB_V;
 }
 
 float readDO() {
@@ -351,7 +392,11 @@ UVData readUV() {
   uvReading.voltage = UVIndex240370Sensor.readUvOriginalData();
   uvReading.index   = UVIndex240370Sensor.readUvIndexData();
   uvReading.level   = UVIndex240370Sensor.readRiskLevelData();
-  uvReading.watts   = uvReading.index * 0.025;
+
+  // Per the WHO Global Solar UV Index standard, 1 UV Index unit = 0.025 W/m2
+  // (equivalently, UV Index = erythemal irradiance in W/m2 x 40).
+  // The factor 0.025 is correct - do not change it.
+  uvReading.watts   = uvReading.index * 0.025f;
   return uvReading;
 }
 
@@ -369,6 +414,13 @@ void readUVC(float &voltage, float &intensity) {
   }
 }
 
+// Bounded MODBUS read. Sets PAR to -1 if no valid frame arrives, rather than
+// blocking the whole sketch until one does.
+//
+// Note this differs from Sensors.ino, which keeps the last known value on
+// failure. A stale reading that looks current is worse for post-flight
+// analysis than an obvious sentinel - the Pi logs every block, so a held
+// value would be indistinguishable from a genuinely steady one.
 void readPAR() {
   PARsensor.listen();
   uint8_t Data[10] = { 0 };
@@ -408,26 +460,27 @@ void readPAR() {
 // =========================================================
 // INA226 LOW-LEVEL I2C
 // =========================================================
-void ina226WriteRegister(uint8_t reg, uint16_t value) {
+// Reports success through `ok` rather than returning a sentinel value.
+// 0 is a perfectly valid reading for both the shunt and bus registers, so a
+// failed read could not otherwise be distinguished from a genuine zero.
+int16_t ina226ReadRegister(uint8_t reg, bool &ok) {
   Wire.beginTransmission(INA226_ADDRESS);
   Wire.write(reg);
-  Wire.write((value >> 8) & 0xFF);
-  Wire.write(value & 0xFF);
-  Wire.endTransmission();
-}
-
-bool ina226ReadRegister(uint8_t reg, uint16_t &value) {
-  Wire.beginTransmission(INA226_ADDRESS);
-  Wire.write(reg);
-  if (Wire.endTransmission() != 0) return false;
+  if (Wire.endTransmission() != 0) {
+    ok = false;
+    return 0;
+  }
 
   Wire.requestFrom(INA226_ADDRESS, 2);
-  if (Wire.available() != 2) return false;
+  if (Wire.available() < 2) {
+    ok = false;
+    return 0;
+  }
 
-  uint8_t hi = Wire.read();
-  uint8_t lo = Wire.read();
-  value = ((uint16_t)hi << 8) | lo;
-  return true;
+  uint16_t value = Wire.read() << 8;
+  value |= Wire.read();
+  ok = true;
+  return (int16_t)value;
 }
 
 // =========================================================
@@ -435,7 +488,11 @@ bool ina226ReadRegister(uint8_t reg, uint16_t &value) {
 // =========================================================
 void handleDOCommands() {
   if (Serial.available() > 0) {
-    user_bytes_received = Serial.readBytesUntil(13, user_data, sizeof(user_data));
+    // Reserve one byte for the terminator. readBytesUntil() does not add one
+    // itself, so a completely full buffer would leave parse_cmd() reading
+    // past the end of the array.
+    user_bytes_received = Serial.readBytesUntil(13, user_data, sizeof(user_data) - 1);
+    user_data[user_bytes_received] = '\0';
     parse_cmd(user_data);
     user_bytes_received = 0;
     memset(user_data, 0, sizeof(user_data));
@@ -443,8 +500,12 @@ void handleDOCommands() {
 }
 
 void parse_cmd(char* string) {
-  strupr(string);
+  // toUpperCase() rather than strupr(). strupr is an MSVC extension and is
+  // not present on every avr-gcc toolchain; a String is being constructed
+  // here anyway, so this costs nothing.
   String cmd = String(string);
+  cmd.toUpperCase();
+
   if (cmd.startsWith("CAL")) {
     int i = cmd.indexOf(',');
     if (i != -1) {
@@ -463,7 +524,10 @@ void parse_cmd(char* string) {
 // =========================================================
 // HELPERS
 // =========================================================
-String riskLevelStr(uint16_t level) {
+// Returns a flash-resident string rather than a heap-allocated String.
+// These labels are fixed constants, and allocating them every loop iteration
+// risks heap fragmentation over a flight-length run on a 2 KB machine.
+const __FlashStringHelper* riskLevelStr(uint16_t level) {
   switch (level) {
     case 0:  return F("Low");
     case 1:  return F("Moderate");

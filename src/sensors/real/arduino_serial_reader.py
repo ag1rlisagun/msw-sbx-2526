@@ -34,6 +34,8 @@ _PARSERS = {
     "PAR:":            ("par",              "par_umol_m2_s"),
     "Current:":        ("current",          "current_a"),
     "DO:":             ("dissolved_oxygen", "do_percent"),
+    "Bus Voltage:":    ("current",          "bus_voltage_v"),
+    "Power:":          ("current",          "power_w"),
     "UV Voltage:":     ("uv",              "uv_voltage_mv"),
     "UV Index:":       ("uv",              "uv_index"),
     "UV Irradiance:":  ("uv",              "uv_irradiance_w_m2"),
